@@ -168,7 +168,7 @@ ol.steps { margin: 0; padding-left: 22px; font-size: 16px; display: flex; flex-d
       <button type="button" class="mic" id="mic" aria-label="開始說英文">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v5"/></svg>
       </button>
-      <textarea id="input" rows="1" placeholder="說英文或打字（也可打中文）"></textarea>
+      <textarea id="input" rows="1" placeholder="說英文或打字"></textarea>
       <button type="button" class="btn primary send" id="send">送出</button>
     </div>
     <div class="tools">
@@ -331,7 +331,11 @@ async function detectTtsModel() {
   const names = (data.models || []).filter(m => (m.supportedGenerationMethods || []).includes("generateContent"))
     .map(m => m.name.replace(/^models\//, "")).filter(n => /tts/i.test(n));
   names.sort((a, b) => (Number(/flash/.test(b)) - Number(/flash/.test(a))) || (ver(b) - ver(a)));
-  return names[0] || "";
+  // Each voice model has its own small free quota, so keep several and rotate (order from real tests 2026-11-21).
+  const PREF = ["gemini-3.8-flash-lite-tts", "gemini-2.5-flash-preview-tts", "gemini-3.1-flash-tts-preview", "gemini-3.8-flash-tts"];
+  settings.ttsModels = [...new Set([...PREF.filter(n => names.includes(n)), ...names])].slice(0, 6);
+  settings.ttsV = 2; settings.ttsCool = {};
+  return settings.ttsModels[0] || "";
 }
 // Gemini voice sometimes ends with a burst of static. Cut trailing silence, drop a short
 // noise-like tail (very high zero-crossing rate) after the last pause, then fade out.
@@ -369,17 +373,34 @@ function cleanTail(f, rate) {
 async function geminiAudio(text, signal) {
   const ck = settings.gVoice + "|" + settings.rate + "|" + text;
   if (gCache.has(ck)) return gCache.get(ck);
-  if (!settings.ttsModel) { settings.ttsModel = await detectTtsModel(); LS.set("settings", settings); if (!settings.ttsModel) throw new Error("找不到語音模型"); }
-  const style = Number(settings.rate) < 0.85 ? "slowly and very clearly" : "clearly, at a natural relaxed pace";
-  const res = await fetch(API + "models/" + settings.ttsModel + ":generateContent", {
-    method: "POST", signal, headers: { "Content-Type": "application/json", "x-goog-api-key": settings.apiKey },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: "Say this in friendly, natural American English, " + style + ":\n" + text }] }],
-      generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: settings.gVoice } } } }
-    })
-  });
-  if (!res.ok) { if (res.status === 404) { settings.ttsModel = ""; LS.set("settings", settings); } throw await apiError(res); }
-  const data = await res.json();
+  if (!settings.ttsModel || !Array.isArray(settings.ttsModels) || settings.ttsV !== 2) { settings.ttsModel = await detectTtsModel(); LS.set("settings", settings); }
+  if (!settings.ttsModels.length) throw new Error("找不到語音模型");
+  settings.ttsCool = settings.ttsCool || {};
+  const t0 = Date.now();
+  let data = null, lastErr = null;
+  for (const m of settings.ttsModels.filter(x => !(settings.ttsCool[x] > t0))) {
+    const left = 15000 - (Date.now() - t0);
+    if (left < 2000) break;
+    let res;
+    try {
+      res = await fetchT(API + "models/" + m + ":generateContent", {
+        method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": settings.apiKey },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text }] }],
+          generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: settings.gVoice } } } }
+        })
+      }, Math.min(10000, left), signal);
+    } catch (e) {
+      if (signal && signal.aborted) throw e;
+      lastErr = e; settings.ttsCool[m] = Date.now() + 10 * 60000; continue;
+    }
+    if (res.ok) { data = await res.json(); break; }
+    lastErr = await apiError(res);
+    const mins = res.status === 429 ? 30 : res.status === 404 ? 24 * 60 : 3;
+    settings.ttsCool[m] = Date.now() + mins * 60000;
+  }
+  LS.set("settings", settings);
+  if (!data) { const e = lastErr || new Error("Gemini 語音的免費額度暫時用完"); if (e.name === "AbortError") e.message = "Gemini 語音太慢"; throw e; }
   const part = ((data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || []).find(p => p.inlineData && p.inlineData.data);
   if (!part) throw new Error("沒有收到聲音");
   const ctx = getCtx(); if (!ctx) throw new Error("這個瀏覽器不能播放");
@@ -401,21 +422,42 @@ async function geminiAudio(text, signal) {
   gCache.set(ck, buf);
   return buf;
 }
+function playBuf(buf) {
+  return new Promise((resolve) => {
+    const ctx = getCtx(); const src = ctx.createBufferSource();
+    src.buffer = buf; src.connect(ctx.destination);
+    src.onended = () => { if (gSrc === src) gSrc = null; resolve(); };
+    gSrc = src; setTalking(true); src.start();
+  });
+}
+// The first line is made and played on its own (short = quick to start); the rest is prepared meanwhile.
 async function gSay(text) {
   stopSay();
   const tok = ++sayToken;
   const ctl = new AbortController(); gCtl = ctl;
+  // Normally one request per turn (75 words were read completely in tests). Only very long turns are split:
+  // the first part plays while the rest is being made (requests go one after another, never at once).
+  const parts = text.split(/\n\n/).filter(Boolean);
+  let chunks = [text];
+  if (text.split(/\s+/).length > 110 && parts.length > 1) { const last = parts.pop(); chunks = [parts.join("\n\n"), last]; }
+  let i = 0;
   try {
-    const buf = await geminiAudio(text, ctl.signal);
-    if (ctl.signal.aborted) return;
-    const ctx = getCtx(); const src = ctx.createBufferSource();
-    src.buffer = buf; src.connect(ctx.destination);
-    src.onended = () => { if (gSrc === src && tok === sayToken) { gSrc = null; setTalking(false); afterSpeak(); } };
-    gSrc = src; setTalking(true); src.start();
+    let next = geminiAudio(chunks[0], ctl.signal);
+    for (; i < chunks.length; i++) {
+      const buf = await next;
+      if (ctl.signal.aborted || tok !== sayToken) return;
+      if (i + 1 < chunks.length) { next = geminiAudio(chunks[i + 1], ctl.signal); next.catch(() => {}); }
+      await playBuf(buf);
+      if (tok !== sayToken) return;
+    }
+    setTalking(false); afterSpeak();
   } catch (e) {
-    if (ctl.signal.aborted) return;
-    setTalking(false); gDown = true; setTimeout(() => { gDown = false; }, 10 * 60 * 1000);
-    toast("Gemini 語音暫時不能用（" + (e.message || "錯誤") + "），先改用 iPhone 的語音。");
+    if (ctl.signal.aborted || tok !== sayToken) return;
+    text = chunks.slice(i).join("\n\n");
+    setTalking(false);
+    const slow = e && e.name === "AbortError";
+    if (!slow) { gDown = true; setTimeout(() => { gDown = false; }, 10 * 60 * 1000); }
+    toast(slow ? "Gemini 語音太慢，這次改用 iPhone 的聲音。" : "Gemini 語音暫時不能用（" + (e.message || "錯誤") + "），先改用 iPhone 的聲音。");
     deviceSay([text]);
   }
 }
@@ -501,7 +543,7 @@ function finishListening(send) {
 }
 function updateMic() {
   const m = $("mic"); m.classList.toggle("on", recWanted); m.setAttribute("aria-label", recWanted ? "說完了，送出" : "開始說英文");
-  $("input").placeholder = recWanted ? "聆聽中…說完停頓 " + (Number(settings.pauseSec) || 3) + " 秒會自動送出" : "說英文或打字（也可打中文）";
+  $("input").placeholder = recWanted ? "聆聽中…停頓 " + (Number(settings.pauseSec) || 3) + " 秒後送出" : "說英文或打字";
 }
 // Hands-free: after the teacher finishes talking, start listening again.
 function afterSpeak() {
@@ -522,18 +564,32 @@ document.addEventListener("visibilitychange", () => {
 /* ================= Gemini API ================= */
 const API = "https://generativelanguage.googleapis.com/v1beta/";
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// fetch with a time limit; an outer signal (Stop) also cancels it.
+async function fetchT(url, opts, ms, outerSignal) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  const onOuter = () => ctl.abort();
+  if (outerSignal) { if (outerSignal.aborted) ctl.abort(); else outerSignal.addEventListener("abort", onOuter); }
+  try { return await fetch(url, Object.assign({}, opts, { signal: ctl.signal })); }
+  finally { clearTimeout(timer); if (outerSignal) outerSignal.removeEventListener("abort", onOuter); }
+}
+let lastInfo = null; // { model, sec } of the last successful text reply
+let pendStart = Date.now();
+setInterval(() => { document.querySelectorAll(".pend-sec").forEach(e => { e.textContent = String(Math.round((Date.now() - pendStart) / 1000)); }); }, 1000);
 async function detectModel(key) {
   const res = await fetch(API + "models?pageSize=200", { headers: { "x-goog-api-key": key } });
   if (!res.ok) throw await apiError(res);
   const data = await res.json();
   const ok = (data.models || []).filter(m => (m.supportedGenerationMethods || []).includes("generateContent")).map(m => m.name.replace(/^models\//, ""));
   const ver = (n) => { const m = n.match(/gemini-(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
-  const all = (re) => ok.filter(n => re.test(n)).sort((a, b) => ver(b) - ver(a));
-  // Stable alias first, then numbered flash models, then lighter models as a last resort when servers are busy.
-  const cand = [...new Set([...all(/^gemini-flash-latest$/), ...all(/^gemini-[\d.]+-flash$/), ...all(/^gemini-flash-lite-latest$/), ...all(/^gemini-[\d.]+-flash-lite$/)])];
-  if (!cand.length) cand.push(...all(/flash(?!.*(image|tts|live|audio|embed))/));
+  // Text models only. Order = what answered fastest and best on a free key in real tests (2026-11-21),
+  // then every other Flash / Flash-Lite model, newest first. Models that fail are skipped at run time.
+  const text = ok.filter(n => /^gemini-/.test(n) && /flash/.test(n) && !/(tts|image|live|audio|embed|transcribe|omni|robotics|computer|banana)/.test(n))
+    .sort((a, b) => ver(b) - ver(a));
+  const PREF = ["gemini-3-flash-preview", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.1-flash-lite-preview", "gemini-flash-lite-latest", "gemini-flash-latest"];
+  const cand = [...new Set([...PREF.filter(n => text.includes(n)), ...text])];
   if (!cand.length && ok[0]) cand.push(ok[0]);
-  settings.altModels = cand.slice(0, 4);
+  settings.altModels = cand.slice(0, 12); settings.detV = 4; settings.cool = {};
   return cand[0];
 }
 async function apiError(res) {
@@ -549,35 +605,68 @@ async function apiError(res) {
 }
 async function gemini(prompt, temperature) {
   if (!settings.apiKey) throw new Error("還沒設定 API 金鑰，請到「設定」貼上。");
-  if (!settings.model || !Array.isArray(settings.altModels)) { settings.model = await detectModel(settings.apiKey); LS.set("settings", settings); }
-  // Retry busy / rate-limited calls, then fall back to the next model.
-  const models = [settings.model, ...settings.altModels.filter(m => m !== settings.model)].slice(0, 3);
+  if (!settings.model || !Array.isArray(settings.altModels) || settings.detV !== 4) { settings.model = await detectModel(settings.apiKey); LS.set("settings", settings); }
+  settings.noThink = settings.noThink || {}; settings.cool = settings.cool || {};
+  // Each try waits at most 10 s; the whole call gives up within about 25 s.
+  // A model that fails is "cooled down" so the next turns skip it: quota 60 min, busy 3 min, too slow 10 min.
+  const now0 = Date.now();
+  const cool = (m, min) => { settings.cool[m] = Date.now() + min * 60000; LS.set("settings", settings); };
+  let models = [settings.model, ...settings.altModels.filter(m => m !== settings.model)].filter(m => !(settings.cool[m] > now0));
+  if (!models.length) models = settings.altModels.slice();
+  models = models.slice(0, 6);
+  const t0 = Date.now();
   let data = null, lastErr = null;
   outer: for (const m of models) {
     const gen = { responseMimeType: "application/json", temperature: temperature == null ? 0.8 : temperature };
     if (/2\.5-flash/.test(m)) gen.thinkingConfig = { thinkingBudget: 0 };
-    for (let attempt = 0; attempt < 3; attempt++) {
+    else if (!/lite/.test(m) && !settings.noThink[m]) gen.thinkingConfig = { thinkingLevel: "low" };
+    let retried = false;
+    for (let guard = 0; guard < 4; guard++) {
+      const left = 25000 - (Date.now() - t0);
+      if (left < 2500) break outer;
       let res;
       try {
-        res = await fetch(API + "models/" + m + ":generateContent", {
+        res = await fetchT(API + "models/" + m + ":generateContent", {
           method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": settings.apiKey },
           body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: gen })
-        });
-      } catch { lastErr = new Error("網路連線失敗，請確認手機有連上網路。"); await sleep(1200); continue; }
-      if (res.ok) { data = await res.json(); if (m !== settings.model) { settings.model = m; LS.set("settings", settings); } break outer; }
-      lastErr = await apiError(res);
-      if (res.status === 404) continue outer;
-      if (res.status === 429 || res.status >= 500) { await sleep(attempt === 0 ? 1500 : 3000); continue; }
+        }, Math.min(10000, left));
+      } catch (e) {
+        if (e && e.name === "AbortError") { lastErr = new Error("Gemini 回覆太慢，請按「重試」。"); cool(m, 10); continue outer; }
+        lastErr = new Error("網路連線失敗，請確認手機有連上網路。"); await sleep(800); continue;
+      }
+      if (res.ok) {
+        const d = await res.json().catch(() => null);
+        if (d && parseReply(d) !== undefined) {
+          data = d; lastInfo = { model: m, sec: (Date.now() - t0) / 1000 };
+          if (settings.model !== m) { settings.model = m; LS.set("settings", settings); } // stick with the model that works
+          break outer;
+        }
+        lastErr = new Error("AI 回覆的格式不對，請再試一次。"); continue outer;
+      }
+      const st = res.status; lastErr = await apiError(res);
+      if (st === 400 && gen.thinkingConfig && !/2\.5/.test(m)) { delete gen.thinkingConfig; settings.noThink[m] = true; LS.set("settings", settings); continue; }
+      if (st === 404) {
+        settings.altModels = settings.altModels.filter(x => x !== m);
+        if (settings.model === m && settings.altModels.length) settings.model = settings.altModels[0];
+        LS.set("settings", settings); continue outer;
+      }
+      if (st === 429) { cool(m, 60); continue outer; }
+      if (st >= 500 && !retried) { retried = true; await sleep(1000); continue; }
+      if (st >= 500) { cool(m, 3); continue outer; }
       throw lastErr;
     }
   }
-  if (!data) throw lastErr || new Error("連線錯誤，請再試一次。");
+  if (!data) throw lastErr || new Error("Gemini 回覆太慢，請按「重試」。");
+  return parseReply(data);
+}
+// Returns the parsed JSON object, or undefined when the reply holds no usable JSON.
+function parseReply(data) {
   const text = ((data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || []).filter(p => !p.thought).map(p => p.text || "").join("");
-  if (!text) throw new Error("AI 沒有回覆內容，請換個說法再試。");
-  try { return JSON.parse(text); } catch {}
+  if (!text) return undefined;
+  try { const o = JSON.parse(text); if (o && typeof o === "object") return o; } catch {}
   const a = text.indexOf("{"), b = text.lastIndexOf("}");
   if (a >= 0 && b > a) { try { return JSON.parse(text.slice(a, b + 1)); } catch {} }
-  throw new Error("AI 回覆的格式不對，請再試一次。");
+  return undefined;
 }
 const S = (v) => (typeof v === "string" ? v.trim() : "");
 
@@ -721,7 +810,7 @@ async function sendTurn() {
 }
 async function runTurn(idx) {
   const turn = current.turns[idx];
-  busy = true; turn.pending = true; turn.error = null; setMood("thinking"); renderChat();
+  busy = true; turn.pending = true; turn.error = null; pendStart = Date.now(); setMood("thinking"); renderChat();
   try {
     const r0 = await gemini(convPrompt(turn.text));
     const r = {
@@ -749,7 +838,7 @@ async function placementNext() {
   const meTurn = current.turns[current.turns.length - 1];
   const prevQ = [...current.turns].reverse().find(t => t.role === "ai");
   let fix = null;
-  busy = true; meTurn.pending = true; setMood("thinking"); renderChat();
+  busy = true; meTurn.pending = true; pendStart = Date.now(); setMood("thinking"); renderChat();
   try { fix = await checkOnly(meTurn.text, prevQ ? prevQ.text : ""); meTurn.result = fix; if (!fix.ok) addSentenceCard(meTurn.text, fix); }
   catch (e) { toast(e.message || "批改失敗"); }
   finally { meTurn.pending = false; busy = false; LS.set("current", current); renderChatTools(); }
@@ -778,8 +867,14 @@ async function placementNext() {
     const msg = "Your level is about " + profile.level + ". " + (S(r.next_focus) || "Let's keep practicing!");
     current.turns.push({ role: "ai", text: msg, zh: "你的程度大約是 " + profile.level + "（" + profile.levelZh + "）。" + S(r.advice_zh) });
     LS.set("profile", profile); setMood("happy"); renderChat();
-    if (settings.autoSpeak) say(msg);
+    if (settings.autoSpeak) say(fix ? [...teachLines(fix, ""), msg] : [msg]);
     finishSession(true);
+    // Show the result screen: hide the input, update the level badge, offer the next step.
+    $("composer").hidden = true;
+    const b = $("lv-badge"); b.hidden = false; b.textContent = "程度 " + profile.level;
+    const st = $("view").querySelector(".stack");
+    if (st) st.append(h("button", { type: "button", class: "btn primary block", onclick: () => go("today") }, "回到今日，開始上課"));
+    $("view").scrollTop = $("view").scrollHeight;
   } catch (e) {
     current.turns.push({ role: "ai", text: "Sorry, I couldn't finish the check.", zh: "評估失敗：" + e.message + "（可按「結束練習」後重做）" }); renderChat();
   } finally { busy = false; renderChatTools(); }
@@ -972,7 +1067,7 @@ function diffNode(said, corrected) {
   return span;
 }
 function feedback(t, idx) {
-  if (t.pending) return h("div", { class: "typing" }, tName() + " 正在看你的句子");
+  if (t.pending) return h("div", { class: "typing" }, tName() + " 正在想（", h("span", { class: "pend-sec" }, String(Math.round((Date.now() - pendStart) / 1000))), " 秒）");
   if (t.error) return h("div", { class: "fb" }, h("div", null, t.error), idx === current.turns.length - 1 ? h("button", { type: "button", class: "btn", onclick: () => runTurn(idx) }, "重試") : null);
   const r = t.result; if (!r) return null;
   if (r.ok) {
@@ -1106,7 +1201,7 @@ function viewLog() {
 function viewSettings() {
   const s = h("div", { class: "stack" });
   const key = h("input", { type: "password", id: "key", placeholder: "貼上 API 金鑰（AIza…）", value: settings.apiKey, autocomplete: "off" });
-  const st = h("div", { class: "small" }, settings.model ? "目前的 AI 模型：" + settings.model : "");
+  const st = h("div", { class: "small" }, settings.model ? "目前的 AI 模型：" + settings.model + (lastInfo ? "・上次回覆 " + lastInfo.sec.toFixed(1) + " 秒（" + lastInfo.model + "）" : "") : "");
   const test = h("button", { type: "button", class: "btn primary" }, "儲存並測試連線");
   test.addEventListener("click", async () => {
     const k = key.value.trim(); if (!k) { toast("請先貼上金鑰。"); return; }
