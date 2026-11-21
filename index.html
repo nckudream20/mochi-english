@@ -219,7 +219,7 @@ const PLACEMENT_Q = [
   { en: "What did you do last weekend?", zh: "你上個週末做了什麼？" },
   { en: "What kind of work do you do?", zh: "你做什麼樣的工作？" },
   { en: "If you could travel anywhere, where would you go, and why?", zh: "如果可以去任何地方旅行，你想去哪裡？為什麼？" },
-  { en: "Tell me about a problem you solved recently, at work or in daily life.", zh: "說說你最近解決的一個問題（工作或生活都可以）。" }
+  { en: "Last question! What would you like to be able to do in English?", zh: "最後一題！你希望用英文做到什麼事？" }
 ];
 const CATEGORIES = ["時態", "冠詞", "介系詞", "單複數", "主詞動詞一致", "用字", "語序", "句型", "說法不自然", "禮貌・語氣", "中文轉英文", "其他"];
 const INTERVALS = [1, 3, 7, 14, 30, 60];
@@ -333,6 +333,39 @@ async function detectTtsModel() {
   names.sort((a, b) => (Number(/flash/.test(b)) - Number(/flash/.test(a))) || (ver(b) - ver(a)));
   return names[0] || "";
 }
+// Gemini voice sometimes ends with a burst of static. Cut trailing silence, drop a short
+// noise-like tail (very high zero-crossing rate) after the last pause, then fade out.
+function cleanTail(f, rate) {
+  const win = Math.max(1, Math.round(rate * 0.02)), nw = Math.floor(f.length / win);
+  if (nw < 15) return f;
+  const rms = new Float32Array(nw), zcr = new Float32Array(nw);
+  let peak = 0;
+  for (let w = 0; w < nw; w++) {
+    let s = 0, z = 0; const a = w * win;
+    for (let i = a; i < a + win; i++) { s += f[i] * f[i]; if (i > a && (f[i] >= 0) !== (f[i - 1] >= 0)) z++; }
+    rms[w] = Math.sqrt(s / win); zcr[w] = z / win; if (rms[w] > peak) peak = rms[w];
+  }
+  const quiet = (w) => rms[w] < peak * 0.03;
+  let end = nw;
+  const trimQuiet = () => { while (end > 1 && quiet(end - 1)) end--; };
+  trimQuiet();
+  for (let pass = 0; pass < 2; pass++) {
+    let run = 0, gap = -1;
+    for (let w = end - 1; w >= 0; w--) { if (quiet(w)) { if (++run >= 10) { gap = w; break; } } else run = 0; }
+    if (gap < 0) break;
+    const tailStart = gap + 10, tailLen = end - tailStart;
+    if (tailLen <= 0) break;
+    let zs = 0; for (let k = tailStart; k < end; k++) zs += zcr[k];
+    if (tailLen * 0.02 < 2.5 && zs / tailLen > 0.3) { end = gap; trimQuiet(); } else break;
+  }
+  // Also drop a noise-like last stretch glued to the speech (no pause before it).
+  let k = end; while (k > 0 && zcr[k - 1] > 0.45 && rms[k - 1] > peak * 0.05 && end - k < 60) k--;
+  if (end - k >= 8) { end = k; trimQuiet(); }
+  const out = f.slice(0, end * win);
+  const fade = Math.min(out.length, Math.round(rate * 0.04));
+  for (let i = 0; i < fade; i++) out[out.length - 1 - i] *= i / fade;
+  return out;
+}
 async function geminiAudio(text, signal) {
   const ck = settings.gVoice + "|" + settings.rate + "|" + text;
   if (gCache.has(ck)) return gCache.get(ck);
@@ -350,10 +383,20 @@ async function geminiAudio(text, signal) {
   const part = ((data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || []).find(p => p.inlineData && p.inlineData.data);
   if (!part) throw new Error("沒有收到聲音");
   const ctx = getCtx(); if (!ctx) throw new Error("這個瀏覽器不能播放");
-  const rate = parseInt(((part.inlineData.mimeType || "").match(/rate=(\d+)/) || [])[1] || "24000", 10);
-  const bin = atob(part.inlineData.data); const n = bin.length >> 1;
-  const buf = ctx.createBuffer(1, n, rate); const ch = buf.getChannelData(0);
-  for (let i = 0; i < n; i++) { let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8); if (v >= 32768) v -= 65536; ch[i] = v / 32768; }
+  const mt = (part.inlineData.mimeType || "").toLowerCase();
+  const bin = atob(part.inlineData.data);
+  let rate, samples;
+  if (!mt || /l16|pcm/.test(mt)) {
+    rate = parseInt((mt.match(/rate=(\d+)/) || [])[1] || "24000", 10);
+    const n = bin.length >> 1; samples = new Float32Array(n);
+    for (let i = 0; i < n; i++) { let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8); if (v >= 32768) v -= 65536; samples[i] = v / 32768; }
+  } else {
+    const bytes = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const decoded = await ctx.decodeAudioData(bytes.buffer);
+    rate = decoded.sampleRate; samples = decoded.getChannelData(0).slice();
+  }
+  samples = cleanTail(samples, rate);
+  const buf = ctx.createBuffer(1, Math.max(1, samples.length), rate); buf.getChannelData(0).set(samples);
   if (gCache.size > 60) gCache.delete(gCache.keys().next().value);
   gCache.set(ck, buf);
   return buf;
@@ -478,14 +521,20 @@ document.addEventListener("visibilitychange", () => {
 
 /* ================= Gemini API ================= */
 const API = "https://generativelanguage.googleapis.com/v1beta/";
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 async function detectModel(key) {
   const res = await fetch(API + "models?pageSize=200", { headers: { "x-goog-api-key": key } });
   if (!res.ok) throw await apiError(res);
   const data = await res.json();
   const ok = (data.models || []).filter(m => (m.supportedGenerationMethods || []).includes("generateContent")).map(m => m.name.replace(/^models\//, ""));
   const ver = (n) => { const m = n.match(/gemini-(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
-  const pick = (re) => ok.filter(n => re.test(n)).sort((a, b) => ver(b) - ver(a))[0];
-  return pick(/^gemini-[\d.]+-flash$/) || pick(/^gemini-[\d.]+-flash(-latest)?$/) || pick(/^gemini-flash-latest$/) || pick(/flash(?!.*(image|tts|live|audio|embed))/) || ok[0];
+  const all = (re) => ok.filter(n => re.test(n)).sort((a, b) => ver(b) - ver(a));
+  // Stable alias first, then numbered flash models, then lighter models as a last resort when servers are busy.
+  const cand = [...new Set([...all(/^gemini-flash-latest$/), ...all(/^gemini-[\d.]+-flash$/), ...all(/^gemini-flash-lite-latest$/), ...all(/^gemini-[\d.]+-flash-lite$/)])];
+  if (!cand.length) cand.push(...all(/flash(?!.*(image|tts|live|audio|embed))/));
+  if (!cand.length && ok[0]) cand.push(ok[0]);
+  settings.altModels = cand.slice(0, 4);
+  return cand[0];
 }
 async function apiError(res) {
   let msg = ""; try { const j = await res.json(); msg = (j.error && j.error.message) || ""; } catch {}
@@ -495,23 +544,34 @@ async function apiError(res) {
   if (s === 401 || s === 403) return new Error("API 金鑰沒有權限，請確認金鑰是否正確。");
   if (s === 404) return new Error("找不到 AI 模型，請到「設定」按「測試連線」重新偵測。");
   if (s === 429) return new Error("免費額度暫時用完，或傳送太頻繁。請等一下再試（每日額度會在隔天重置）。");
-  if (s >= 500) return new Error("Google 那邊暫時忙碌，請稍後再試。");
+  if (s >= 500) return new Error("Gemini 現在很忙（免費版常有），已自動重試。請等幾秒再按「重試」。");
   return new Error("連線錯誤（" + s + "）");
 }
 async function gemini(prompt, temperature) {
   if (!settings.apiKey) throw new Error("還沒設定 API 金鑰，請到「設定」貼上。");
-  if (!settings.model) { settings.model = await detectModel(settings.apiKey); LS.set("settings", settings); }
-  const gen = { responseMimeType: "application/json", temperature: temperature == null ? 0.8 : temperature };
-  if (/2\.5-flash/.test(settings.model)) gen.thinkingConfig = { thinkingBudget: 0 };
-  let res;
-  try {
-    res = await fetch(API + "models/" + settings.model + ":generateContent", {
-      method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": settings.apiKey },
-      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: gen })
-    });
-  } catch { throw new Error("網路連線失敗，請確認手機有連上網路。"); }
-  if (!res.ok) throw await apiError(res);
-  const data = await res.json();
+  if (!settings.model || !Array.isArray(settings.altModels)) { settings.model = await detectModel(settings.apiKey); LS.set("settings", settings); }
+  // Retry busy / rate-limited calls, then fall back to the next model.
+  const models = [settings.model, ...settings.altModels.filter(m => m !== settings.model)].slice(0, 3);
+  let data = null, lastErr = null;
+  outer: for (const m of models) {
+    const gen = { responseMimeType: "application/json", temperature: temperature == null ? 0.8 : temperature };
+    if (/2\.5-flash/.test(m)) gen.thinkingConfig = { thinkingBudget: 0 };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let res;
+      try {
+        res = await fetch(API + "models/" + m + ":generateContent", {
+          method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": settings.apiKey },
+          body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: gen })
+        });
+      } catch { lastErr = new Error("網路連線失敗，請確認手機有連上網路。"); await sleep(1200); continue; }
+      if (res.ok) { data = await res.json(); if (m !== settings.model) { settings.model = m; LS.set("settings", settings); } break outer; }
+      lastErr = await apiError(res);
+      if (res.status === 404) continue outer;
+      if (res.status === 429 || res.status >= 500) { await sleep(attempt === 0 ? 1500 : 3000); continue; }
+      throw lastErr;
+    }
+  }
+  if (!data) throw lastErr || new Error("連線錯誤，請再試一次。");
   const text = ((data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || []).filter(p => !p.thought).map(p => p.text || "").join("");
   if (!text) throw new Error("AI 沒有回覆內容，請換個說法再試。");
   try { return JSON.parse(text); } catch {}
@@ -622,9 +682,9 @@ async function checkOnly(said, question) {
     "The learner answered (from speech recognition; ignore capitalization, punctuation and obvious recognition glitches):", JSON.stringify(said),
     CORRECTION_RULES,
     "Reply with ONLY JSON:",
-    '{"ok":true/false,"corrected":"corrected sentence (same as learner if ok)","natural":"how a native speaker would naturally say it","explain_en":"...","explain_zh":"...","category":"one of ' + CATEGORIES.join("/") + ' or empty if ok","praise_zh":"if ok, one short encouraging sentence in Traditional Chinese"}'
-  ].join("\n"), 0.2);
-  return normResult(r0, said);
+    '{"ok":true/false,"corrected":"corrected sentence (same as learner if ok)","natural":"how a native speaker would naturally say it","explain_en":"...","explain_zh":"...","category":"one of ' + CATEGORIES.join("/") + ' or empty if ok","praise_zh":"if ok, one short encouraging sentence in Traditional Chinese","reaction":"one short, warm, natural English reaction to what they said, like a real person (if they asked you something, answer it briefly)","reaction_zh":"Traditional Chinese translation of reaction"}'
+  ].join("\n"), 0.3);
+  return Object.assign(normResult(r0, said), { reaction: S(r0.reaction), reaction_zh: S(r0.reaction_zh) });
 }
 function convPrompt(said) {
   const hist = current.turns.slice(0, -1).slice(-14).map(t => (t.role === "ai" ? "Coach: " : "Learner: ") + t.text).join("\n");
@@ -642,7 +702,7 @@ function convPrompt(said) {
     "",
     "Do this:",
     "1. Check the learner's latest message. " + CORRECTION_RULES,
-    "2. Reply in character with 1-3 short natural sentences, react to what they said, and usually end with a question. If the learner seems stuck, offer an easy follow-up question or a new topic.",
+    "2. Then reply the way a real person would in a natural conversation. FIRST respond to what the learner actually said. If they asked you something (for example 'Why do you ask?' or 'What about you?'), answer it honestly and simply before anything else. Stay on the same thread: ask follow-up questions about what they just told you instead of jumping to an unrelated topic, and sometimes share a short opinion or experience of your own. Do not fire random interview questions. Keep it to 1-3 short sentences. Change the topic only if the learner seems stuck or asks for it. If their message was a meta question about the lesson, answer it kindly and then continue.",
     "3. About once every 3-4 turns, introduce ONE new useful word or expression that fits the moment (slightly above their level, not in the known list), and use it in your reply. Otherwise new_word is null.",
     "Reply with ONLY JSON:",
     '{"ok":true/false,"corrected":"minimally corrected sentence (same as learner if ok)","natural":"how a native speaker would naturally say it here","explain_en":"short simple English explanation of the correction (empty if ok)","explain_zh":"same explanation in Traditional Chinese (Taiwan), 1-3 short numbered points (empty if ok)","category":"one of ' + CATEGORIES.join("/") + ' or empty if ok","praise_zh":"if ok, one short encouraging sentence in Traditional Chinese","reply":"your English reply","reply_zh":"Traditional Chinese translation of reply","mood":"happy or thinking or normal","new_word":null or {"word":"...","zh":"...","emoji":"...","example":"...","example_zh":"..."}}'
@@ -696,9 +756,10 @@ async function placementNext() {
   const answered = current.turns.filter(t => t.role === "me").length;
   if (answered < PLACEMENT_Q.length) {
     const q = PLACEMENT_Q[answered];
-    current.turns.push({ role: "ai", text: q.en, zh: q.zh });
+    const react = fix && fix.reaction ? fix.reaction + " " : "";
+    current.turns.push({ role: "ai", text: react + q.en, zh: (fix && fix.reaction_zh ? fix.reaction_zh + " " : "") + q.zh });
     LS.set("current", current); setMood(fix && !fix.ok ? "normal" : "happy"); renderChat();
-    if (settings.autoSpeak) say(fix ? [...teachLines(fix, ""), q.en] : [q.en]); else afterSpeak();
+    if (settings.autoSpeak) say(fix ? [...teachLines(fix, ""), react + q.en] : [q.en]); else afterSpeak();
     return;
   }
   busy = true; current.turns.push({ role: "ai", text: "Thank you! Let me think about your level for a moment…", zh: "謝謝！我來評估一下你的程度…" }); setMood("thinking"); renderChat();
