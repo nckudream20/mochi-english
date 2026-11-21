@@ -1,0 +1,922 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Mochi英文">
+<meta name="theme-color" content="#F4F1FA">
+<title>Mochi English</title>
+<style>
+/* Layout: phone-first app shell — top bar / scrolling view / (chat composer) / bottom tab bar. */
+:root {
+  --bg: #F4F1FA; --surface: #FFFFFF; --surface-2: #ECE7F6; --ink: #1F1A2E; --muted: #625B74; --line: #DCD5EA;
+  --accent: #6B4FD8; --accent-ink: #FFFFFF; --accent-soft: #E6DFFB;
+  --me: #DDEBFF; --red: #C23A2B; --red-soft: #FBE3DF; --green: #23774A; --green-soft: #DCF2E4; --amber-soft: #FFF2CF;
+  --font: -apple-system, BlinkMacSystemFont, "PingFang TC", "Hiragino Sans", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15121D; --surface: #1F1A2A; --surface-2: #2A2438; --ink: #EEEAF6; --muted: #A9A1BC; --line: #3A3249;
+    --accent: #A08CFF; --accent-ink: #15121D; --accent-soft: #332A52;
+    --me: #23344D; --red: #FF9C8C; --red-soft: #45241F; --green: #86D9A6; --green-soft: #1B3527; --amber-soft: #3A321B;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font); font-size: 17px; line-height: 1.6; -webkit-text-size-adjust: 100%; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.app { height: 100dvh; display: grid; grid-template-rows: auto 1fr auto auto; max-width: 680px; margin: 0 auto; }
+.topbar { padding: calc(env(safe-area-inset-top, 0px) + 10px) max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left)); display: flex; align-items: center; gap: 10px; background: var(--bg); }
+.topbar h1 { font-size: 20px; margin: 0; margin-right: auto; letter-spacing: -.01em; }
+.badge { font-size: 15px; padding: 2px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 600; white-space: nowrap; }
+.view { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 4px max(16px, env(safe-area-inset-right)) 24px max(16px, env(safe-area-inset-left)); }
+.stack { display: flex; flex-direction: column; gap: 14px; }
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.card h2 { font-size: 18px; margin: 0; }
+.card h3 { font-size: 16px; margin: 0; color: var(--muted); }
+.muted { color: var(--muted); font-size: 16px; }
+.small { font-size: 15px; color: var(--muted); }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.btn { border: 1px solid var(--line); background: var(--surface); border-radius: 14px; padding: 10px 16px; font-size: 17px; font-weight: 600; min-height: 46px; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.ghost { background: transparent; }
+.btn.block { width: 100%; }
+.btn.danger { color: var(--red); }
+.btn:disabled { opacity: .5; }
+input[type="text"], input[type="password"], select, textarea { font-size: 17px; border: 1px solid var(--line); background: var(--bg); border-radius: 12px; padding: 10px 12px; width: 100%; }
+label.chk { display: flex; align-items: center; gap: 10px; font-size: 17px; }
+label.chk input { width: 22px; height: 22px; accent-color: var(--accent); }
+
+/* Avatar */
+.avatar { width: 84px; height: 84px; flex: none; border-radius: 50%; background: var(--accent-soft); display: grid; place-items: center; overflow: hidden; }
+.avatar.sm { width: 52px; height: 52px; }
+.avatar svg { width: 92%; height: 92%; }
+.avatar .e-happy, .avatar .e-think { display: none; }
+.avatar[data-mood="happy"] .e-normal, .avatar[data-mood="thinking"] .e-normal { display: none; }
+.avatar[data-mood="happy"] .e-happy { display: inline; }
+.avatar[data-mood="thinking"] .e-think { display: inline; }
+.avatar .m-open { opacity: 0; }
+.talking .avatar .m-open { animation: talkO .32s steps(1) infinite; }
+.talking .avatar .m-closed { animation: talkC .32s steps(1) infinite; }
+@keyframes talkO { 0% { opacity: 1 } 50% { opacity: 0 } }
+@keyframes talkC { 0% { opacity: 0 } 50% { opacity: 1 } }
+
+.stage { display: flex; gap: 12px; align-items: center; padding: 6px 0 10px; }
+.stage .say { flex: 1; min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 10px 12px; font-size: 16px; position: relative; }
+.stage .name { font-weight: 700; font-size: 16px; }
+
+/* Lesson */
+.phrase { font-size: 21px; font-weight: 700; color: var(--accent); }
+.words { display: grid; gap: 10px; }
+.word { display: grid; grid-template-columns: 56px 1fr auto; gap: 10px; align-items: center; background: var(--surface-2); border-radius: 14px; padding: 10px; }
+.word .emo { font-size: 38px; line-height: 1; text-align: center; }
+.word .w { font-weight: 700; font-size: 18px; }
+.word .ex { font-size: 15px; color: var(--muted); }
+
+.spk { flex: none; width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); display: inline-grid; place-items: center; padding: 0; color: var(--accent); }
+.spk svg { width: 20px; height: 20px; }
+
+/* Chat */
+.msgs { display: flex; flex-direction: column; gap: 12px; padding-bottom: 8px; }
+.msg { display: flex; gap: 8px; max-width: 94%; align-items: flex-end; }
+.msg.ai { align-self: flex-start; }
+.msg.me { align-self: flex-end; flex-direction: column; align-items: flex-end; }
+.bubble { padding: 10px 12px; border-radius: 16px; font-size: 17px; overflow-wrap: anywhere; display: flex; gap: 8px; align-items: flex-start; }
+.ai .bubble { background: var(--surface); border: 1px solid var(--line); border-bottom-left-radius: 4px; flex-direction: column; align-items: stretch; }
+.me .bubble { background: var(--me); border-bottom-right-radius: 4px; }
+.ai .bubble .line1 { display: flex; gap: 8px; align-items: flex-start; }
+.ai .bubble .line1 .t { flex: 1; min-width: 0; }
+details.zh { font-size: 15px; color: var(--muted); }
+details.zh summary { cursor: pointer; }
+.fb { width: 100%; background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--red); border-radius: 14px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; font-size: 16px; }
+.fb.ok { border-left-color: var(--green); background: var(--green-soft); }
+.fb .lbl { font-size: 15px; font-weight: 700; color: var(--muted); }
+.fb .ln { display: flex; gap: 8px; align-items: flex-start; }
+.fb .ln .t { flex: 1; min-width: 0; font-size: 17px; overflow-wrap: anywhere; }
+.del { color: var(--red); text-decoration: line-through; text-decoration-thickness: 2px; }
+.ins { color: var(--green); font-weight: 700; background: var(--green-soft); border-radius: 4px; padding: 0 3px; }
+.chip { display: inline-block; font-size: 15px; padding: 1px 10px; border-radius: 999px; background: var(--red-soft); color: var(--red); width: fit-content; }
+.newword { background: var(--amber-soft); border-radius: 14px; padding: 10px 12px; display: grid; grid-template-columns: 44px 1fr auto; gap: 8px; align-items: center; font-size: 16px; }
+.newword .emo { font-size: 32px; text-align: center; }
+.typing { color: var(--muted); font-size: 16px; }
+.typing::after { content: "…"; animation: blink 1.2s steps(4) infinite; }
+@keyframes blink { 0% { opacity: .2 } 50% { opacity: 1 } 100% { opacity: .2 } }
+
+.composer { padding: 8px max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left)); background: var(--surface); border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.composer .inrow { display: flex; gap: 8px; align-items: flex-end; }
+.mic { flex: none; width: 52px; height: 52px; border-radius: 50%; border: 0; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; }
+.mic svg { width: 24px; height: 24px; }
+.mic.on { background: var(--red); color: #fff; }
+.composer textarea { height: 52px; resize: none; line-height: 1.4; }
+.composer .send { flex: none; height: 52px; }
+.composer .tools { display: flex; gap: 8px; flex-wrap: wrap; }
+.composer .tools .btn { min-height: 38px; padding: 4px 12px; font-size: 16px; font-weight: 500; }
+.hints { display: flex; flex-direction: column; gap: 6px; }
+.hint { display: flex; gap: 8px; align-items: center; background: var(--surface-2); border-radius: 12px; padding: 6px 10px; font-size: 16px; }
+.hint .t { flex: 1; min-width: 0; }
+.hint .t small { display: block; color: var(--muted); font-size: 15px; }
+
+.tabbar { display: grid; grid-template-columns: repeat(5, 1fr); background: var(--surface); border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom, 0px); }
+.tabbar button { border: 0; background: none; padding: 8px 0 6px; font-size: 15px; color: var(--muted); display: flex; flex-direction: column; align-items: center; gap: 2px; position: relative; }
+.tabbar button .i { font-size: 22px; line-height: 1; }
+.tabbar button[aria-current="page"] { color: var(--accent); font-weight: 700; }
+.tabbar .dot { position: absolute; top: 4px; left: calc(50% + 8px); min-width: 20px; height: 20px; border-radius: 10px; background: var(--red); color: #fff; font-size: 13px; line-height: 20px; padding: 0 5px; }
+
+/* Review */
+.flash { min-height: 220px; justify-content: center; text-align: center; }
+.flash .big { font-size: 56px; line-height: 1.1; }
+.flash .front { font-size: 22px; font-weight: 700; }
+.grade { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+
+/* Log */
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.stat { background: var(--surface-2); border-radius: 14px; padding: 10px; text-align: center; }
+.stat b { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
+.sess { border-top: 1px solid var(--line); padding-top: 10px; }
+.sess summary { cursor: pointer; font-size: 16px; }
+.sess .turn { font-size: 15px; padding: 4px 0; border-bottom: 1px dashed var(--line); }
+
+.toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(env(safe-area-inset-bottom, 0px) + 84px); background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 12px; font-size: 16px; z-index: 50; max-width: calc(100% - 32px); }
+.avpick { display: flex; gap: 12px; }
+.avpick button { border: 2px solid var(--line); background: var(--surface); border-radius: 18px; padding: 8px; display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 16px; }
+.avpick button[aria-pressed="true"] { border-color: var(--accent); }
+ol.steps { margin: 0; padding-left: 22px; font-size: 16px; display: flex; flex-direction: column; gap: 6px; }
+@media (prefers-reduced-motion: reduce) { .talking .avatar .m-open, .talking .avatar .m-closed, .typing::after { animation: none; } }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <header class="topbar">
+    <div class="avatar sm" id="top-av"></div>
+    <h1 id="top-title">Mochi 英文教室</h1>
+    <span class="badge" id="lv-badge" hidden></span>
+  </header>
+  <main class="view" id="view"></main>
+  <div class="composer" id="composer" hidden>
+    <div class="hints" id="hints" hidden></div>
+    <div class="inrow">
+      <button type="button" class="mic" id="mic" aria-label="開始說英文">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v5"/></svg>
+      </button>
+      <textarea id="input" rows="1" placeholder="說英文或打字（也可打中文）"></textarea>
+      <button type="button" class="btn primary send" id="send">送出</button>
+    </div>
+    <div class="tools">
+      <button type="button" class="btn" id="hint-btn">給我提示</button>
+      <button type="button" class="btn" id="stop-say">停止朗讀</button>
+      <button type="button" class="btn" id="end-btn">結束練習</button>
+    </div>
+  </div>
+  <nav class="tabbar" id="tabbar">
+    <button type="button" data-v="today"><span class="i">📖</span>今日</button>
+    <button type="button" data-v="chat"><span class="i">💬</span>對話</button>
+    <button type="button" data-v="review"><span class="i">🔁</span>複習<span class="dot" id="due-dot" hidden></span></button>
+    <button type="button" data-v="log"><span class="i">📒</span>紀錄</button>
+    <button type="button" data-v="settings"><span class="i">⚙️</span>設定</button>
+  </nav>
+</div>
+<input type="file" id="import-file" accept="application/json,.json" hidden>
+
+<script>
+(() => {
+"use strict";
+
+/* ================= Storage ================= */
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem("me." + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("me." + k, JSON.stringify(v)); return true; } catch { toast("手機的儲存空間不足，請到「設定」備份後刪除舊紀錄。"); return false; } }
+};
+const DEF_SETTINGS = { apiKey: "", model: "", avatar: "cat", rate: 0.9, voice: "", autoSpeak: true, autoSend: true };
+let settings = Object.assign({}, DEF_SETTINGS, LS.get("settings", {}));
+let profile = Object.assign({ level: "", levelZh: "", weak: [], strengths: [], note: "", nextFocus: "", stage: "travel", topicIdx: 0, day: 1, levelHistory: [], placementDone: false, practiceDays: [] }, LS.get("profile", {}));
+let sessions = LS.get("sessions", []);
+let cards = LS.get("cards", []);
+let lesson = LS.get("lesson", null);
+let textbook = LS.get("textbook", "");
+let current = LS.get("current", null);
+const saveAll = () => { LS.set("settings", settings); LS.set("profile", profile); LS.set("sessions", sessions); LS.set("cards", cards); LS.set("lesson", lesson); LS.set("textbook", textbook); LS.set("current", current); };
+
+/* ================= Data ================= */
+const STAGES = {
+  travel: { name: "旅行篇", topics: ["機場報到", "飛機上", "入境審查", "飯店入住", "問路", "搭計程車・電車", "餐廳點餐", "咖啡廳", "購物・退換貨", "旅途中的小麻煩"] },
+  daily: { name: "日常閒聊篇", topics: ["自我介紹", "週末做了什麼", "興趣嗜好", "天氣與季節", "喜歡的食物", "家人與朋友", "電影與音樂", "健康與運動", "假期計畫", "最近的新聞"] },
+  business: { name: "商務篇", topics: ["跟同事寒暄", "會議中報告進度", "跟供應商確認交期", "請對方寄樣品", "漲價交涉", "品質問題的溝通", "電話應對", "線上會議的開場與結尾", "請求與拒絕", "感謝與道歉"] }
+};
+const STAGE_ORDER = ["travel", "daily", "business"];
+const PLACEMENT_Q = [
+  { en: "Hi! I'm happy to meet you. Could you tell me a little about yourself?", zh: "嗨！很高興認識你。可以簡單介紹一下自己嗎？" },
+  { en: "What did you do last weekend?", zh: "你上個週末做了什麼？" },
+  { en: "What kind of work do you do?", zh: "你做什麼樣的工作？" },
+  { en: "If you could travel anywhere, where would you go, and why?", zh: "如果可以去任何地方旅行，你想去哪裡？為什麼？" },
+  { en: "Tell me about a problem you solved recently, at work or in daily life.", zh: "說說你最近解決的一個問題（工作或生活都可以）。" }
+];
+const CATEGORIES = ["時態", "冠詞", "介系詞", "單複數", "主詞動詞一致", "用字", "語序", "句型", "說法不自然", "禮貌・語氣", "中文轉英文", "其他"];
+const INTERVALS = [1, 3, 7, 14, 30, 60];
+const AV = { cat: { name: "Mochi", who: "貓咪老師" }, person: { name: "Alex", who: "人像老師" } };
+
+/* ================= Helpers ================= */
+const $ = (id) => document.getElementById(id);
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  if (attrs) for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "html") el.innerHTML = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
+  return el;
+}
+const todayStr = () => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); };
+const addDays = (n) => { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n); return d.getTime(); };
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const hasCJK = (s) => /[぀-ヿ㐀-鿿]/.test(s);
+let toastTimer;
+function toast(msg) {
+  document.querySelectorAll(".toast").forEach(e => e.remove());
+  const t = h("div", { class: "toast", role: "status" }, msg); document.body.append(t);
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.remove(), 3800);
+}
+const dueCards = () => { const now = Date.now(); return cards.filter(c => c.due <= now); };
+
+/* ================= Avatar ================= */
+function avatarSVG(kind) {
+  const mouth = '<path class="m-closed" d="M52 79 Q56 84 60 79 Q64 84 68 79" fill="none" stroke="#3B2A2A" stroke-width="2.6" stroke-linecap="round"/><ellipse class="m-open" cx="60" cy="81" rx="6" ry="5.5" fill="#8E3B3B"/>';
+  if (kind === "person") return '<svg viewBox="0 0 120 120" aria-hidden="true">' +
+    '<path d="M22 120 Q24 96 60 94 Q96 96 98 120Z" fill="#5E7BD6"/><path d="M50 94 L60 106 L70 94Z" fill="#fff"/>' +
+    '<rect x="52" y="80" width="16" height="16" rx="6" fill="#E9B894"/>' +
+    '<ellipse cx="60" cy="58" rx="30" ry="33" fill="#F2C7A5"/>' +
+    '<path d="M29 56 Q26 22 60 22 Q96 22 91 56 Q88 40 74 36 Q60 44 40 38 Q32 44 29 56Z" fill="#3A2C2A"/>' +
+    '<g class="e-normal"><ellipse cx="48" cy="60" rx="3.6" ry="4.6" fill="#2A1F1F"/><ellipse cx="72" cy="60" rx="3.6" ry="4.6" fill="#2A1F1F"/></g>' +
+    '<g class="e-happy" fill="none" stroke="#2A1F1F" stroke-width="2.6" stroke-linecap="round"><path d="M43 61 Q48 55 53 61"/><path d="M67 61 Q72 55 77 61"/></g>' +
+    '<g class="e-think"><ellipse cx="50" cy="57" rx="3.6" ry="4.6" fill="#2A1F1F"/><ellipse cx="74" cy="57" rx="3.6" ry="4.6" fill="#2A1F1F"/></g>' +
+    '<path d="M42 50 Q48 47 54 50 M66 50 Q72 47 78 50" stroke="#3A2C2A" stroke-width="2.4" fill="none" stroke-linecap="round"/>' +
+    '<ellipse cx="40" cy="70" rx="5" ry="3" fill="#F09A8A" opacity=".55"/><ellipse cx="80" cy="70" rx="5" ry="3" fill="#F09A8A" opacity=".55"/>' +
+    mouth + '</svg>';
+  return '<svg viewBox="0 0 120 120" aria-hidden="true">' +
+    '<path d="M20 54 L26 14 L52 36Z" fill="#F7F3EE" stroke="#4A3F3A" stroke-width="3" stroke-linejoin="round"/>' +
+    '<path d="M100 54 L94 14 L68 36Z" fill="#F7F3EE" stroke="#4A3F3A" stroke-width="3" stroke-linejoin="round"/>' +
+    '<path d="M29 42 L30 25 L44 36Z" fill="#F6B8C4"/><path d="M91 42 L90 25 L76 36Z" fill="#F6B8C4"/>' +
+    '<ellipse cx="60" cy="68" rx="45" ry="38" fill="#F7F3EE" stroke="#4A3F3A" stroke-width="3"/>' +
+    '<path d="M74 34 Q86 38 92 50 Q82 46 72 46Z" fill="#E8A65B" opacity=".9"/>' +
+    '<g class="e-normal"><ellipse cx="44" cy="64" rx="5" ry="7" fill="#2B2320"/><ellipse cx="76" cy="64" rx="5" ry="7" fill="#2B2320"/><circle cx="45.8" cy="61" r="1.9" fill="#fff"/><circle cx="77.8" cy="61" r="1.9" fill="#fff"/></g>' +
+    '<g class="e-happy" fill="none" stroke="#2B2320" stroke-width="3" stroke-linecap="round"><path d="M38 66 Q44 57 50 66"/><path d="M70 66 Q76 57 82 66"/></g>' +
+    '<g class="e-think"><ellipse cx="47" cy="60" rx="5" ry="6.5" fill="#2B2320"/><ellipse cx="79" cy="60" rx="5" ry="6.5" fill="#2B2320"/><circle cx="48.6" cy="57.6" r="1.8" fill="#fff"/><circle cx="80.6" cy="57.6" r="1.8" fill="#fff"/></g>' +
+    '<ellipse cx="33" cy="76" rx="7" ry="4" fill="#F6A3B3" opacity=".6"/><ellipse cx="87" cy="76" rx="7" ry="4" fill="#F6A3B3" opacity=".6"/>' +
+    '<path d="M57 72 L63 72 L60 75.5Z" fill="#E98A9C"/>' +
+    '<g stroke="#4A3F3A" stroke-width="1.6" stroke-linecap="round"><path d="M22 72 L36 74"/><path d="M22 80 L36 78"/><path d="M98 72 L84 74"/><path d="M98 80 L84 78"/></g>' +
+    mouth + '</svg>';
+}
+function avatarEl(size) { const d = h("div", { class: "avatar" + (size === "sm" ? " sm" : ""), "data-mood": "normal", html: avatarSVG(settings.avatar) }); return d; }
+function setMood(m) { document.querySelectorAll(".avatar").forEach(a => a.dataset.mood = m); }
+function setTalking(on) { document.body.classList.toggle("talking", on); }
+const tName = () => AV[settings.avatar].name;
+
+/* ================= Speech out (iPhone voice) ================= */
+const synth = ("speechSynthesis" in window) ? window.speechSynthesis : null;
+let voicesCache = [];
+function loadVoices() { if (synth) voicesCache = synth.getVoices().filter(v => /^en[-_]/i.test(v.lang)); }
+if (synth) { loadVoices(); synth.addEventListener?.("voiceschanged", () => { loadVoices(); if (view === "settings") render(); }); }
+let warnedNoVoice = false;
+function pickVoice() {
+  if (!voicesCache.length) loadVoices();
+  if (!voicesCache.length) {
+    if (!warnedNoVoice) { warnedNoVoice = true; toast("這台裝置找不到英文語音，發音可能不標準。iPhone 內建美式英文語音（Samantha），不會有這個問題。"); }
+    return null;
+  }
+  return voicesCache.find(v => v.voiceURI === settings.voice)
+    || voicesCache.find(v => /en[-_]US/i.test(v.lang) && /Natural/i.test(v.name) && /Jenny|Ava|Aria/i.test(v.name))
+    || voicesCache.find(v => /en[-_]US/i.test(v.lang) && /Samantha|Ava|Allison|Nicky|Google US/i.test(v.name))
+    || voicesCache.find(v => /en[-_]US/i.test(v.lang)) || voicesCache[0] || null;
+}
+let unlocked = false;
+document.addEventListener("touchend", unlockAudio, { passive: true });
+document.addEventListener("click", unlockAudio);
+function unlockAudio() {
+  if (unlocked || !synth) return; unlocked = true;
+  try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; synth.speak(u); } catch {}
+}
+function say(texts) {
+  if (!synth) { toast("這個瀏覽器不能朗讀，請用 iPhone 的 Safari 開啟。"); return; }
+  const list = (Array.isArray(texts) ? texts : [texts]).filter(Boolean);
+  if (!list.length) return;
+  synth.cancel();
+  const v = pickVoice();
+  list.forEach((t, i) => {
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = "en-US"; if (v) { u.voice = v; u.lang = v.lang; }
+    u.rate = Number(settings.rate) || 0.9;
+    u.onstart = () => setTalking(true);
+    u.onend = () => { if (i === list.length - 1) setTalking(false); };
+    u.onerror = () => setTalking(false);
+    synth.speak(u);
+  });
+}
+function stopSay() { try { synth && synth.cancel(); } catch {} setTalking(false); }
+const SPK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>';
+const spk = (text, label) => h("button", { type: "button", class: "spk", "aria-label": label || "朗讀", html: SPK, onclick: (e) => { e.stopPropagation(); say(text); } });
+
+/* ================= Speech in (iPhone Safari) ================= */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, recOn = false, recText = "";
+function toggleMic() {
+  if (!SR) { toast("這裡不能用語音辨識。請點輸入框，按鍵盤右下角的 🎤 說英文（鍵盤語言請切成 English）。"); $("input").focus(); return; }
+  if (recOn) { try { rec.stop(); } catch {} return; }
+  if (busy) return;
+  stopSay();
+  rec = new SR(); rec.lang = "en-US"; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
+  recText = ""; $("input").value = "";
+  rec.onresult = (e) => {
+    let fin = "", tmp = "";
+    for (let i = 0; i < e.results.length; i++) { const r = e.results[i]; if (r.isFinal) fin += r[0].transcript; else tmp += r[0].transcript; }
+    recText = fin; $("input").value = (fin + " " + tmp).trim();
+  };
+  rec.onerror = (e) => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") toast("沒有允許使用麥克風。請到 iPhone 的「設定 > Safari > 麥克風」允許，或用鍵盤的 🎤。");
+    else if (e.error === "no-speech") toast("沒有聽到聲音，請再按一次麥克風。");
+    else if (e.error !== "aborted") toast("語音辨識出錯（" + e.error + "），可以改用鍵盤的 🎤。");
+  };
+  rec.onend = () => {
+    recOn = false; updateMic();
+    const text = ($("input").value || "").trim();
+    if (settings.autoSend && text) sendTurn();
+  };
+  try { rec.start(); recOn = true; updateMic(); } catch { toast("麥克風無法啟動，請再按一次。"); }
+}
+function updateMic() { const m = $("mic"); m.classList.toggle("on", recOn); m.setAttribute("aria-label", recOn ? "說完了" : "開始說英文"); }
+
+/* ================= Gemini API ================= */
+const API = "https://generativelanguage.googleapis.com/v1beta/";
+async function detectModel(key) {
+  const res = await fetch(API + "models?pageSize=200", { headers: { "x-goog-api-key": key } });
+  if (!res.ok) throw await apiError(res);
+  const data = await res.json();
+  const ok = (data.models || []).filter(m => (m.supportedGenerationMethods || []).includes("generateContent")).map(m => m.name.replace(/^models\//, ""));
+  const ver = (n) => { const m = n.match(/gemini-(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
+  const pick = (re) => ok.filter(n => re.test(n)).sort((a, b) => ver(b) - ver(a))[0];
+  return pick(/^gemini-[\d.]+-flash$/) || pick(/^gemini-[\d.]+-flash(-latest)?$/) || pick(/^gemini-flash-latest$/) || pick(/flash(?!.*(image|tts|live|audio|embed))/) || ok[0];
+}
+async function apiError(res) {
+  let msg = ""; try { const j = await res.json(); msg = (j.error && j.error.message) || ""; } catch {}
+  const s = res.status;
+  if (s === 400 && /API key/i.test(msg)) return new Error("API 金鑰不正確，請到「設定」重新貼上。");
+  if (s === 400) return new Error("要求的格式有誤（" + msg.slice(0, 80) + "）");
+  if (s === 401 || s === 403) return new Error("API 金鑰沒有權限，請確認金鑰是否正確。");
+  if (s === 404) return new Error("找不到 AI 模型，請到「設定」按「測試連線」重新偵測。");
+  if (s === 429) return new Error("免費額度暫時用完，或傳送太頻繁。請等一下再試（每日額度會在隔天重置）。");
+  if (s >= 500) return new Error("Google 那邊暫時忙碌，請稍後再試。");
+  return new Error("連線錯誤（" + s + "）");
+}
+async function gemini(prompt, temperature) {
+  if (!settings.apiKey) throw new Error("還沒設定 API 金鑰，請到「設定」貼上。");
+  if (!settings.model) { settings.model = await detectModel(settings.apiKey); LS.set("settings", settings); }
+  const gen = { responseMimeType: "application/json", temperature: temperature == null ? 0.8 : temperature };
+  if (/2\.5-flash/.test(settings.model)) gen.thinkingConfig = { thinkingBudget: 0 };
+  let res;
+  try {
+    res = await fetch(API + "models/" + settings.model + ":generateContent", {
+      method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": settings.apiKey },
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: gen })
+    });
+  } catch { throw new Error("網路連線失敗，請確認手機有連上網路。"); }
+  if (!res.ok) throw await apiError(res);
+  const data = await res.json();
+  const text = ((data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || []).filter(p => !p.thought).map(p => p.text || "").join("");
+  if (!text) throw new Error("AI 沒有回覆內容，請換個說法再試。");
+  try { return JSON.parse(text); } catch {}
+  const a = text.indexOf("{"), b = text.lastIndexOf("}");
+  if (a >= 0 && b > a) { try { return JSON.parse(text.slice(a, b + 1)); } catch {} }
+  throw new Error("AI 回覆的格式不對，請再試一次。");
+}
+const S = (v) => (typeof v === "string" ? v.trim() : "");
+
+function learnerContext() {
+  return [
+    "Learner: adult from Taiwan, native language Traditional Chinese, works at a Japanese company in product operations (private-brand products, suppliers, logistics).",
+    "Estimated level: " + (profile.level || "unknown (assume A2-B1)") + ".",
+    profile.weak.length ? "Known weak points: " + profile.weak.join(", ") + "." : "",
+    profile.nextFocus ? "Focus for now: " + profile.nextFocus : ""
+  ].filter(Boolean).join("\n");
+}
+function knownWords() { return cards.filter(c => c.type === "word").slice(-120).map(c => c.word); }
+
+/* ================= Lesson ================= */
+function curTopic() { const st = STAGES[profile.stage] || STAGES.travel; return { stage: profile.stage, stageName: st.name, topic: st.topics[profile.topicIdx % st.topics.length] }; }
+async function makeLesson() {
+  const t = curTopic();
+  const prompt = [
+    "You are an English coach planning today's short speaking lesson.", learnerContext(),
+    "Course stage: " + t.stage + ". Today's topic (Chinese): " + t.topic + ". Day " + profile.day + ".",
+    textbook ? "The learner is also studying this phrase from their textbook today; build the lesson around it if it fits: " + JSON.stringify(textbook) : "",
+    "Words the learner already has (do NOT reuse): " + JSON.stringify(knownWords()),
+    "Pick ONE key phrase pattern that is very useful in this situation, and exactly 3 new words or short expressions slightly above the learner's level that fit the topic.",
+    "For each word give one emoji that pictures its meaning.",
+    "Then write the opening line your character will say to start a role-play conversation on this topic (1-2 short sentences ending with a question).",
+    "Reply with ONLY JSON:",
+    '{"title_zh":"short lesson title in Traditional Chinese (Taiwan)","scene_zh":"one sentence describing the role-play situation and who plays whom, Traditional Chinese","role":"who the AI plays, in English","phrase":"key phrase pattern, e.g. Could I have ~?","phrase_zh":"meaning in Traditional Chinese","phrase_tip_zh":"one-line usage tip in Traditional Chinese","phrase_example":"one example sentence","words":[{"word":"...","zh":"...","emoji":"...","example":"short example sentence","example_zh":"..."}],"opener":"...","opener_zh":"..."}'
+  ].filter(Boolean).join("\n");
+  const r = await gemini(prompt, 0.9);
+  const words = (Array.isArray(r.words) ? r.words : []).filter(w => w && S(w.word)).slice(0, 3).map(w => ({ word: S(w.word), zh: S(w.zh), emoji: S(w.emoji) || "📝", example: S(w.example), example_zh: S(w.example_zh) }));
+  lesson = {
+    date: todayStr(), day: profile.day, stage: t.stage, topic: t.topic,
+    title_zh: S(r.title_zh) || t.topic, scene_zh: S(r.scene_zh), role: S(r.role) || "a friendly conversation partner",
+    phrase: S(r.phrase), phrase_zh: S(r.phrase_zh), phrase_tip_zh: S(r.phrase_tip_zh), phrase_example: S(r.phrase_example),
+    words, opener: S(r.opener) || "Hi! Shall we start?", opener_zh: S(r.opener_zh)
+  };
+  words.forEach(w => addWordCard(w));
+  LS.set("lesson", lesson);
+}
+function addWordCard(w) {
+  if (!w || !w.word) return;
+  if (cards.some(c => c.type === "word" && c.word.toLowerCase() === w.word.toLowerCase())) return;
+  cards.push({ id: uid(), type: "word", word: w.word, zh: w.zh, emoji: w.emoji || "📝", example: w.example || "", example_zh: w.example_zh || "", step: 0, due: addDays(1), created: Date.now() });
+  LS.set("cards", cards);
+}
+function addSentenceCard(said, r) {
+  cards.push({ id: uid(), type: "sentence", said, corrected: r.corrected, natural: r.natural, explain_zh: r.explain_zh, category: r.category, step: 0, due: addDays(1), created: Date.now() });
+  LS.set("cards", cards);
+}
+
+/* ================= Conversation ================= */
+let busy = false, hints = null;
+function startSession(mode) {
+  stopSay();
+  if (mode === "placement") {
+    current = { id: uid(), mode, started: Date.now(), topic: "程度測驗", q: 0, turns: [{ role: "ai", text: PLACEMENT_Q[0].en, zh: PLACEMENT_Q[0].zh }] };
+  } else if (mode === "lesson" && lesson) {
+    current = { id: uid(), mode, started: Date.now(), topic: lesson.title_zh, turns: [{ role: "ai", text: lesson.opener, zh: lesson.opener_zh }] };
+  } else {
+    current = { id: uid(), mode: "free", started: Date.now(), topic: "自由聊天", turns: [{ role: "ai", text: "Hi! It's good to see you. What's on your mind today? I can also pick a topic for you.", zh: "嗨！很高興見到你。今天想聊什麼？我也可以幫你選個話題。" }] };
+  }
+  LS.set("current", current); hints = null;
+  go("chat");
+  if (settings.autoSpeak) say(current.turns[0].text);
+}
+
+function convPrompt(said) {
+  const hist = current.turns.slice(0, -1).slice(-14).map(t => (t.role === "ai" ? "Coach: " : "Learner: ") + t.text).join("\n");
+  const L = current.mode === "lesson" && lesson ? lesson : null;
+  return [
+    "You are " + tName() + ", a warm, curious English conversation coach" + (settings.avatar === "cat" ? " (a friendly cat character)" : "") + ". You talk like a real friend: natural, relaxed spoken English, short turns.",
+    learnerContext(),
+    L ? "Today's role-play: " + L.scene_zh + " You play: " + L.role + ". Key phrase to practice: " + L.phrase + ". Today's words to weave in naturally: " + L.words.map(w => w.word).join(", ") + "." : "Free conversation. If the learner has nothing to say or gives a very short answer, YOU bring up an interesting, everyday topic suited to them (work life in Japan, food, travel, hobbies, seasons) and ask an easy question.",
+    textbook ? "The learner is also practicing this textbook phrase: " + JSON.stringify(textbook) + ". Create chances for them to use it." : "",
+    "Words the learner already knows (for reference): " + JSON.stringify(knownWords().slice(-40)),
+    "",
+    "Conversation so far:", hist || "(start)",
+    "",
+    "The learner just said (from speech recognition; ignore capitalization, punctuation and obvious recognition glitches):", JSON.stringify(said),
+    "",
+    "Do this:",
+    "1. Check the learner's message for grammar, word choice and naturalness, matched to their level (do not nitpick tiny style points for beginners). If it is in Chinese, give the English for what they meant.",
+    "2. Reply in character with 1-3 short natural sentences, react to what they said, and usually end with a question. If the learner seems stuck, offer an easy follow-up question or a new topic.",
+    "3. About once every 3-4 turns, introduce ONE new useful word or expression that fits the moment (slightly above their level, not in the known list), and use it in your reply. Otherwise new_word is null.",
+    "Reply with ONLY JSON:",
+    '{"ok":true/false,"corrected":"minimally corrected sentence (same as learner if ok)","natural":"how a native speaker would naturally say it here","explain_en":"short simple English explanation of the correction (empty if ok)","explain_zh":"same explanation in Traditional Chinese (Taiwan), 1-3 short numbered points (empty if ok)","category":"one of ' + CATEGORIES.join("/") + ' or empty if ok","praise_zh":"if ok, one short encouraging sentence in Traditional Chinese","reply":"your English reply","reply_zh":"Traditional Chinese translation of reply","mood":"happy or thinking or normal","new_word":null or {"word":"...","zh":"...","emoji":"...","example":"...","example_zh":"..."}}'
+  ].filter(x => x !== "").join("\n");
+}
+
+async function sendTurn() {
+  const inp = $("input"); const said = (inp.value || "").trim();
+  if (!said || busy || !current) return;
+  inp.value = ""; hints = null; stopSay();
+  current.turns.push({ role: "me", text: said });
+  LS.set("current", current);
+  if (current.mode === "placement") return placementNext();
+  await runTurn(current.turns.length - 1);
+}
+async function runTurn(idx) {
+  const turn = current.turns[idx];
+  busy = true; turn.pending = true; turn.error = null; setMood("thinking"); renderChat();
+  try {
+    const r0 = await gemini(convPrompt(turn.text));
+    const r = {
+      ok: r0.ok === true, corrected: S(r0.corrected) || turn.text, natural: S(r0.natural), explain_en: S(r0.explain_en), explain_zh: S(r0.explain_zh),
+      category: S(r0.category), praise_zh: S(r0.praise_zh), reply: S(r0.reply), reply_zh: S(r0.reply_zh), mood: S(r0.mood),
+      new_word: r0.new_word && S(r0.new_word.word) ? { word: S(r0.new_word.word), zh: S(r0.new_word.zh), emoji: S(r0.new_word.emoji) || "📝", example: S(r0.new_word.example), example_zh: S(r0.new_word.example_zh) } : null
+    };
+    if (!r.reply) throw new Error("AI 回覆的格式不對，請再試一次。");
+    if (!r.ok && !CATEGORIES.includes(r.category)) r.category = "其他";
+    turn.result = r; turn.pending = false;
+    current.turns.push({ role: "ai", text: r.reply, zh: r.reply_zh, newWord: r.new_word });
+    if (!r.ok) addSentenceCard(turn.text, r);
+    if (r.new_word) addWordCard(r.new_word);
+    LS.set("current", current);
+    setMood(r.ok ? "happy" : (r.mood === "thinking" ? "thinking" : "normal"));
+    renderChat();
+    if (settings.autoSpeak) say(r.ok ? [r.reply] : [r.corrected, r.reply]);
+  } catch (e) {
+    turn.pending = false; turn.error = e.message || "發生錯誤，請再試一次。"; setMood("normal"); renderChat();
+  } finally { busy = false; renderChatTools(); }
+}
+
+async function placementNext() {
+  const answered = current.turns.filter(t => t.role === "me").length;
+  if (answered < PLACEMENT_Q.length) {
+    const q = PLACEMENT_Q[answered];
+    current.turns.push({ role: "ai", text: q.en, zh: q.zh });
+    LS.set("current", current); setMood("happy"); renderChat();
+    if (settings.autoSpeak) say(q.en);
+    return;
+  }
+  busy = true; current.turns.push({ role: "ai", text: "Thank you! Let me think about your level for a moment…", zh: "謝謝！我來評估一下你的程度…" }); setMood("thinking"); renderChat();
+  try {
+    const answers = current.turns.filter(t => t.role === "me").map((t, i) => "Q" + (i + 1) + ": " + PLACEMENT_Q[i].en + "\nA: " + t.text).join("\n\n");
+    const r = await gemini([
+      "You are an experienced English speaking examiner. Estimate this learner's spoken English level from their answers (they came from speech recognition, so ignore punctuation).",
+      "Learner: adult from Taiwan, native Traditional Chinese.", answers,
+      "Reply with ONLY JSON:",
+      '{"level":"one of A1, A2, B1, B2, C1","level_zh":"short Traditional Chinese description of what they can do","strengths_zh":["..."],"weak_tags":["short English tags of main weak points, e.g. past tense, articles"],"weak_zh":["same weak points in Traditional Chinese"],"start_stage":"travel or daily or business","next_focus":"one short English sentence about what to focus on","advice_zh":"2-3 sentences of advice in Traditional Chinese, warm and encouraging"}'
+    ].join("\n"), 0.3);
+    applyLevel(r, true);
+    profile.placementDone = true;
+    profile.stage = ["travel", "daily", "business"].includes(S(r.start_stage)) ? S(r.start_stage) : (/^A/.test(profile.level) ? "travel" : /^B1/.test(profile.level) ? "daily" : "business");
+    profile.topicIdx = 0; lesson = null; LS.set("lesson", lesson);
+    const msg = "Your level is about " + profile.level + ". " + (S(r.next_focus) || "Let's keep practicing!");
+    current.turns.push({ role: "ai", text: msg, zh: "你的程度大約是 " + profile.level + "（" + profile.levelZh + "）。" + S(r.advice_zh) });
+    LS.set("profile", profile); setMood("happy"); renderChat();
+    if (settings.autoSpeak) say(msg);
+    finishSession(true);
+  } catch (e) {
+    current.turns.push({ role: "ai", text: "Sorry, I couldn't finish the check.", zh: "評估失敗：" + e.message + "（可按「結束練習」後重做）" }); renderChat();
+  } finally { busy = false; renderChatTools(); }
+}
+function applyLevel(r, fromPlacement) {
+  const lv = S(r.level).toUpperCase();
+  if (/^(A1|A2|B1|B2|C1|C2)$/.test(lv)) {
+    if (lv !== profile.level || fromPlacement) profile.levelHistory.push({ date: todayStr(), level: lv });
+    profile.level = lv;
+  }
+  if (S(r.level_zh)) profile.levelZh = S(r.level_zh);
+  if (Array.isArray(r.weak_tags)) profile.weak = r.weak_tags.map(S).filter(Boolean).slice(0, 6);
+  if (Array.isArray(r.weak_zh)) profile.weakZh = r.weak_zh.map(S).filter(Boolean).slice(0, 6);
+  if (Array.isArray(r.strengths_zh)) profile.strengths = r.strengths_zh.map(S).filter(Boolean).slice(0, 4);
+  if (S(r.next_focus)) profile.nextFocus = S(r.next_focus);
+  if (S(r.advice_zh)) profile.note = S(r.advice_zh);
+}
+
+async function finishSession(silent) {
+  if (!current) return;
+  const mine = current.turns.filter(t => t.role === "me" && (t.result || current.mode === "placement"));
+  const sess = current;
+  current = null; LS.set("current", null);
+  if (!mine.length) { if (!silent) go("today"); return; }
+  const record = {
+    id: sess.id, date: todayStr(), mode: sess.mode, topic: sess.topic, started: sess.started,
+    turns: sess.turns.filter(t => !t.pending).map(t => t.role === "ai" ? { r: "ai", t: t.text } : { r: "me", t: t.text, c: t.result && !t.result.ok ? t.result.corrected : "" }),
+    total: mine.length, mistakes: mine.filter(t => t.result && !t.result.ok).length
+  };
+  sessions.unshift(record); if (sessions.length > 300) sessions.length = 300;
+  if (!profile.practiceDays.includes(record.date)) profile.practiceDays.push(record.date);
+  if (sess.mode === "lesson" && mine.length >= 5) { profile.topicIdx++; profile.day++; if (profile.topicIdx % 10 === 0) profile.stage = STAGE_ORDER[(STAGE_ORDER.indexOf(profile.stage) + 1) % 3]; lesson = null; LS.set("lesson", null); }
+  LS.set("sessions", sessions); LS.set("profile", profile);
+  if (sess.mode !== "placement" && mine.length >= 3) {
+    if (!silent) toast("練習已存檔，正在更新你的程度…");
+    try {
+      const lines = mine.map(t => "Learner: " + t.text + (t.result && !t.result.ok ? "  -> corrected: " + t.result.corrected + " [" + t.result.category + "]" : "  (ok)")).join("\n");
+      const r = await gemini([
+        "You track an English learner's progress. Current estimate: " + (profile.level || "unknown") + ". Previous weak points: " + profile.weak.join(", "),
+        "Today's practice (" + record.topic + "):", lines,
+        "Update the estimate gradually: change the level only if today's evidence clearly shows it. Reply with ONLY JSON:",
+        '{"level":"A1/A2/B1/B2/C1","weak_tags":["up to 5 short English tags"],"weak_zh":["same in Traditional Chinese"],"next_focus":"one short English sentence","summary_zh":"2-3 sentences in Traditional Chinese: what went well today and one thing to work on","advice_zh":""}'
+      ].join("\n"), 0.3);
+      applyLevel(r, false);
+      record.summary = S(r.summary_zh); LS.set("sessions", sessions); LS.set("profile", profile);
+    } catch (e) { record.summary = ""; }
+  }
+  if (!silent) go("log");
+}
+
+/* ================= Teacher prompt for Gemini Live ================= */
+function teacherPrompt() {
+  const L = lesson && lesson.date === todayStr() ? lesson : null;
+  return [
+    "Please be my English conversation partner. Your name is " + tName() + (settings.avatar === "cat" ? ", a friendly cat English teacher." : ", a friendly English teacher."),
+    "About me: I'm from Taiwan, my native language is Traditional Chinese, and I work at a Japanese company in product operations. My English level is about " + (profile.level || "A2-B1") + ".",
+    profile.weak.length ? "My weak points: " + profile.weak.join(", ") + "." : "",
+    L ? "Today's topic: " + L.scene_zh + " You play: " + L.role + ". Today's key phrase: " + L.phrase + ". Today's new words: " + L.words.map(w => w.word).join(", ") + ". Please help me use them." : "Please choose interesting everyday topics for me and keep the conversation going.",
+    textbook ? "I'm also practicing this phrase: " + textbook + "." : "",
+    "Rules:",
+    "1. Talk naturally like a friend. Keep your turns short (1-3 sentences) and speak a little slowly and clearly.",
+    "2. Always ask me a question so I keep speaking. If I get stuck, suggest an easy answer or change the topic.",
+    "3. When I make a mistake, first reply to what I said, then say \"Small correction:\" and give the correct sentence. Explain briefly in simple English, then once more in Traditional Chinese.",
+    "4. Sometimes teach me one new useful word that fits the conversation.",
+    "5. When I say \"summary\", list my mistakes with corrections and the new words from today.",
+    "Let's start now. Please greet me and ask the first question."
+  ].filter(Boolean).join("\n");
+}
+async function copyTeacher() {
+  const text = teacherPrompt();
+  try { await navigator.clipboard.writeText(text); toast("已複製！打開 Gemini App → 貼上送出 → 按 Live 開始聊天。"); }
+  catch { const ta = h("textarea", { readonly: true }, text); ta.style.height = "200px"; const box = $("teacher-box"); if (box) { box.replaceChildren(h("div", { class: "small" }, "無法自動複製，請長按下面的文字全選複製："), ta); } }
+}
+
+/* ================= Review (local, no API) ================= */
+let rv = { list: [], i: 0, flipped: false };
+function startReview() { rv = { list: dueCards().sort((a, b) => a.due - b.due).slice(0, 30), i: 0, flipped: false }; render(); }
+function grade(g) {
+  const c = rv.list[rv.i]; if (!c) return;
+  const real = cards.find(x => x.id === c.id);
+  if (real) {
+    if (g === 0) real.step = 0; else if (g === 2) real.step = Math.min(real.step + 1, INTERVALS.length - 1);
+    real.due = addDays(g === 0 ? 1 : INTERVALS[real.step]);
+    real.reviews = (real.reviews || 0) + 1; LS.set("cards", cards);
+  }
+  rv.i++; rv.flipped = false; stopSay(); render();
+}
+
+/* ================= Views ================= */
+let view = "today";
+function go(v) { view = v; render(); $("view").scrollTop = 0; }
+function render() {
+  $("top-av").innerHTML = avatarSVG(settings.avatar);
+  const b = $("lv-badge"); b.hidden = !profile.level; b.textContent = "程度 " + profile.level;
+  const due = dueCards().length; const dot = $("due-dot"); dot.hidden = !due; dot.textContent = due > 99 ? "99+" : due;
+  document.querySelectorAll("#tabbar button").forEach(btn => btn.toggleAttribute("aria-current", false) || (btn.dataset.v === view && btn.setAttribute("aria-current", "page")));
+  $("composer").hidden = view !== "chat" || !current;
+  const v = $("view");
+  const fn = { today: viewToday, chat: viewChat, review: viewReview, log: viewLog, settings: viewSettings }[view];
+  v.replaceChildren(fn());
+  if (view === "chat") { renderChatTools(); v.scrollTop = v.scrollHeight; }
+}
+
+function viewToday() {
+  const s = h("div", { class: "stack" });
+  const t = curTopic();
+  const greet = !settings.apiKey ? "第一次使用嗎？先到「設定」貼上 Gemini 的 API 金鑰吧！"
+    : !profile.placementDone ? "我是 " + tName() + "！先花 5 分鐘做程度測驗，我會幫你安排適合的課程。"
+    : "今天也一起練習吧！" + (dueCards().length ? "有 " + dueCards().length + " 個要複習。" : "");
+  s.append(h("div", { class: "stage" }, avatarEl(), h("div", { class: "say" }, h("div", { class: "name" }, tName()), greet)));
+  if (!settings.apiKey) { s.append(h("button", { type: "button", class: "btn primary block", onclick: () => go("settings") }, "前往設定")); return s; }
+  if (current) s.append(h("div", { class: "card" }, h("h2", null, "練習進行中：" + current.topic), h("button", { type: "button", class: "btn primary block", onclick: () => go("chat") }, "繼續對話")));
+  if (!profile.placementDone) { s.append(h("div", { class: "card" }, h("h2", null, "程度測驗（約 5 分鐘）"), h("div", { class: "muted" }, "回答 5 個問題，用說的或打字都可以。答錯也沒關係，盡量說就好。"), h("button", { type: "button", class: "btn primary block", onclick: () => startSession("placement") }, "開始測驗"))); }
+  // Lesson card
+  const lc = h("div", { class: "card" });
+  lc.append(h("h3", null, t.stageName + "・Day " + profile.day));
+  if (lesson && lesson.date === todayStr() || lesson && lesson.day === profile.day) {
+    const L = lesson;
+    lc.append(h("h2", null, L.title_zh), L.scene_zh ? h("div", { class: "muted" }, L.scene_zh) : null);
+    lc.append(h("div", { class: "row" }, h("span", { class: "phrase" }, L.phrase), spk(L.phrase_example || L.phrase)),
+      h("div", null, L.phrase_zh), L.phrase_tip_zh ? h("div", { class: "small" }, "💡 " + L.phrase_tip_zh) : null,
+      L.phrase_example ? h("div", { class: "small" }, "例：" + L.phrase_example) : null);
+    lc.append(h("h3", null, "今天的 3 個新單字"), h("div", { class: "words" }, L.words.map(w => h("div", { class: "word" },
+      h("div", { class: "emo", "aria-hidden": "true" }, w.emoji), h("div", null, h("div", { class: "w" }, w.word), h("div", null, w.zh), h("div", { class: "ex" }, w.example), h("div", { class: "ex" }, w.example_zh)), spk(w.word + ". " + w.example)))));
+    lc.append(h("button", { type: "button", class: "btn primary block", onclick: () => startSession("lesson") }, "開始對話練習"));
+    lc.append(h("button", { type: "button", class: "btn block", onclick: copyTeacher }, "複製老師設定 → 用 Gemini Live 聊"), h("div", { id: "teacher-box" }));
+  } else {
+    lc.append(h("h2", null, t.topic), h("div", { class: "muted" }, "依你的程度產生今天的句型和 3 個新單字。"));
+    const btn = h("button", { type: "button", class: "btn primary block" }, "產生今天的課程");
+    btn.addEventListener("click", async () => { btn.disabled = true; btn.textContent = "準備中…"; setMood("thinking"); try { await makeLesson(); setMood("happy"); render(); } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = "產生今天的課程"; setMood("normal"); } });
+    lc.append(btn);
+  }
+  s.append(lc);
+  const tb = h("input", { type: "text", id: "textbook", placeholder: "例：Excuse me, ~ please.", value: textbook });
+  tb.addEventListener("change", () => { textbook = tb.value.trim(); LS.set("textbook", textbook); toast("已記下，課程和對話會用到這個句型。"); });
+  s.append(h("div", { class: "card" }, h("h2", null, "今天在講義學的句型（可不填）"), tb, h("div", { class: "small" }, "填了之後，產生課程和對話時會讓你練習這個句型。")));
+  s.append(h("div", { class: "card" }, h("h2", null, "自由聊天"), h("div", { class: "muted" }, tName() + " 會主動找話題跟你聊。"), h("button", { type: "button", class: "btn block", onclick: () => startSession("free") }, "開始自由聊天")));
+  return s;
+}
+
+function diffWords(a, b) {
+  const norm = (w) => w.toLowerCase().replace(/[^a-z0-9']/g, "");
+  const A = a.trim().split(/\s+/).filter(Boolean), B = b.trim().split(/\s+/).filter(Boolean), n = A.length, m = B.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = norm(A[i]) === norm(B[j]) ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const out = []; let i = 0, j = 0;
+  while (i < n && j < m) { if (norm(A[i]) === norm(B[j])) { out.push(["s", B[j]]); i++; j++; } else if (dp[i + 1][j] >= dp[i][j + 1]) out.push(["del", A[i++]]); else out.push(["ins", B[j++]]); }
+  while (i < n) out.push(["del", A[i++]]); while (j < m) out.push(["ins", B[j++]]);
+  return out;
+}
+function diffNode(said, corrected) {
+  const span = h("span", { class: "t" });
+  if (hasCJK(said)) { span.append(corrected); return span; }
+  diffWords(said, corrected).forEach(([t, w], k) => { if (k) span.append(" "); span.append(t === "s" ? w : h("span", { class: t }, w)); });
+  return span;
+}
+function feedback(t, idx) {
+  if (t.pending) return h("div", { class: "typing" }, tName() + " 正在看你的句子");
+  if (t.error) return h("div", { class: "fb" }, h("div", null, t.error), idx === current.turns.length - 1 ? h("button", { type: "button", class: "btn", onclick: () => runTurn(idx) }, "重試") : null);
+  const r = t.result; if (!r) return null;
+  if (r.ok) {
+    const k = [h("div", { class: "lbl" }, "👍 很好！"), h("div", null, r.praise_zh || "說得很自然！")];
+    if (r.natural && r.natural.toLowerCase().replace(/[^a-z]/g, "") !== t.text.toLowerCase().replace(/[^a-z]/g, "")) k.push(h("div", { class: "lbl" }, "也可以這樣說"), h("div", { class: "ln" }, h("span", { class: "t" }, r.natural), spk(r.natural)));
+    return h("div", { class: "fb ok" }, ...k);
+  }
+  const k = [h("div", { class: "lbl" }, "✏️ 修正"), h("div", { class: "ln" }, diffNode(t.text, r.corrected), spk(r.corrected))];
+  if (r.explain_en) k.push(h("div", null, "EN：" + r.explain_en));
+  if (r.explain_zh) k.push(h("div", { style: "white-space:pre-line" }, "中：" + r.explain_zh));
+  if (r.natural && r.natural !== r.corrected) k.push(h("div", { class: "lbl" }, "🗣 更自然的說法"), h("div", { class: "ln" }, h("span", { class: "t" }, r.natural), spk(r.natural)));
+  if (r.category) k.push(h("span", { class: "chip" }, r.category));
+  return h("div", { class: "fb" }, ...k);
+}
+function viewChat() {
+  const s = h("div", { class: "stack" });
+  if (!current) {
+    s.append(h("div", { class: "stage" }, avatarEl(), h("div", { class: "say" }, h("div", { class: "name" }, tName()), "現在沒有進行中的練習。到「今日」選課程，或直接開始自由聊天。")));
+    s.append(h("button", { type: "button", class: "btn primary block", onclick: () => startSession("free") }, "開始自由聊天"));
+    return s;
+  }
+  s.append(h("div", { class: "stage" }, avatarEl(), h("div", { class: "say" }, h("div", { class: "name" }, tName() + "・" + current.topic), current.mode === "placement" ? "回答 5 個問題就好，不用擔心說錯。" : "說錯也沒關係，盡量說出口！")));
+  const msgs = h("div", { class: "msgs", id: "msgs" });
+  current.turns.forEach((t, idx) => {
+    if (t.role === "ai") {
+      const b = h("div", { class: "bubble" }, h("div", { class: "line1" }, h("span", { class: "t" }, t.text), spk(t.text)),
+        t.zh ? h("details", { class: "zh" }, h("summary", null, "中文"), h("div", null, t.zh)) : null);
+      const wrap = h("div", { class: "msg ai" }, b);
+      msgs.append(wrap);
+      if (t.newWord) msgs.append(h("div", { class: "newword" }, h("div", { class: "emo", "aria-hidden": "true" }, t.newWord.emoji), h("div", null, h("b", null, "新單字：" + t.newWord.word), " " + t.newWord.zh, h("div", { class: "small" }, t.newWord.example)), spk(t.newWord.word + ". " + t.newWord.example)));
+    } else {
+      msgs.append(h("div", { class: "msg me" }, h("div", { class: "bubble" }, t.text), current.mode === "placement" ? null : feedback(t, idx)));
+    }
+  });
+  s.append(msgs);
+  return s;
+}
+function renderChat() { if (view === "chat") { const v = $("view"); v.replaceChildren(viewChat()); renderChatTools(); v.scrollTop = v.scrollHeight; } }
+function renderChatTools() {
+  $("composer").hidden = view !== "chat" || !current;
+  $("send").disabled = busy; $("hint-btn").disabled = busy || !current || current.mode === "placement";
+  const hb = $("hints");
+  if (!hints) { hb.hidden = true; hb.replaceChildren(); return; }
+  hb.hidden = false;
+  if (hints === "loading") { hb.replaceChildren(h("div", { class: "typing" }, "想提示中")); return; }
+  if (typeof hints === "string") { hb.replaceChildren(h("div", { class: "small" }, hints)); return; }
+  hb.replaceChildren(...hints.map(x => h("div", { class: "hint" }, h("span", { class: "t" }, x.en, h("small", null, x.zh)), spk(x.en),
+    h("button", { type: "button", class: "btn", style: "min-height:38px;padding:2px 10px", onclick: () => { $("input").value = x.en; hints = null; renderChatTools(); } }, "用"))));
+}
+async function getHints() {
+  if (!current || busy) return;
+  const last = [...current.turns].reverse().find(t => t.role === "ai"); if (!last) return;
+  hints = "loading"; renderChatTools();
+  try {
+    const r = await gemini("An English learner (level " + (profile.level || "A2-B1") + ", native Traditional Chinese) is talking with a coach. The coach just said: " + JSON.stringify(last.text) + (lesson && current.mode === "lesson" ? "\nTry to use the key phrase: " + lesson.phrase : "") + "\nSuggest 3 different natural replies the learner could say, suited to their level, 1-2 short sentences each.\nReply with ONLY JSON: {\"hints\":[{\"en\":\"...\",\"zh\":\"Traditional Chinese translation\"}]}");
+    const list = (Array.isArray(r.hints) ? r.hints : []).filter(x => x && S(x.en)).slice(0, 3).map(x => ({ en: S(x.en), zh: S(x.zh) }));
+    hints = list.length ? list : "暫時想不到，請再按一次。";
+  } catch (e) { hints = e.message; }
+  renderChatTools();
+}
+
+function viewReview() {
+  const s = h("div", { class: "stack" });
+  const due = dueCards();
+  if (!rv.list.length || rv.i >= rv.list.length) {
+    const done = rv.list.length && rv.i >= rv.list.length;
+    s.append(h("div", { class: "stage" }, avatarEl(), h("div", { class: "say" }, h("div", { class: "name" }, tName()),
+      done ? "複習完成！做得很好 🎉" : due.length ? "今天有 " + due.length + " 個要複習（修正過的句子和單字）。" : "今天沒有要複習的。明天再來看看！")));
+    if (due.length) s.append(h("button", { type: "button", class: "btn primary block", onclick: startReview }, "開始複習（最多 30 個）"));
+    const nw = cards.filter(c => c.type === "word").length, ns = cards.length - nw;
+    s.append(h("div", { class: "card" }, h("h2", null, "複習的排程"), h("div", { class: "muted" }, "記得 → 下次間隔變長（1・3・7・14・30・60 天）；忘記 → 明天再出現。"), h("div", { class: "small" }, "單字 " + nw + " 個・句子 " + ns + " 個")));
+    return s;
+  }
+  const c = rv.list[rv.i];
+  const card = h("div", { class: "card flash" });
+  card.append(h("div", { class: "small" }, (rv.i + 1) + " / " + rv.list.length + "・" + (c.type === "word" ? "單字" : "句子")));
+  if (c.type === "word") {
+    card.append(h("div", { class: "big", "aria-hidden": "true" }, c.emoji), h("div", { class: "front" }, c.word), h("div", { class: "row", style: "justify-content:center" }, spk(c.word)));
+    if (rv.flipped) card.append(h("div", null, c.zh), h("div", { class: "small" }, c.example), h("div", { class: "small" }, c.example_zh), h("div", { class: "row", style: "justify-content:center" }, spk(c.example)));
+    else card.append(h("div", { class: "muted" }, "先想想意思，或用這個字說一句話"));
+  } else {
+    card.append(h("div", { class: "muted" }, "你之前說："), h("div", { class: "front del" }, c.said), h("div", { class: "muted" }, "正確要怎麼說？先說出口再翻面"));
+    if (rv.flipped) card.append(h("div", { class: "front", style: "color:var(--green)" }, c.corrected), h("div", { class: "row", style: "justify-content:center" }, spk(c.corrected)), c.natural && c.natural !== c.corrected ? h("div", { class: "small" }, "更自然：" + c.natural) : null, c.explain_zh ? h("div", { class: "small", style: "white-space:pre-line" }, c.explain_zh) : null);
+  }
+  s.append(card);
+  if (!rv.flipped) s.append(h("button", { type: "button", class: "btn primary block", onclick: () => { rv.flipped = true; render(); if (c.type === "sentence") say(c.corrected); } }, "翻面看答案"));
+  else s.append(h("div", { class: "grade" },
+    h("button", { type: "button", class: "btn", onclick: () => grade(0) }, "忘記了"),
+    h("button", { type: "button", class: "btn", onclick: () => grade(1) }, "有點難"),
+    h("button", { type: "button", class: "btn primary", onclick: () => grade(2) }, "記得")));
+  return s;
+}
+
+function streak() {
+  const set = new Set(profile.practiceDays); let n = 0; const d = new Date();
+  if (!set.has(todayStr())) d.setDate(d.getDate() - 1);
+  for (;;) { const k = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); if (set.has(k)) { n++; d.setDate(d.getDate() - 1); } else break; }
+  return n;
+}
+function viewLog() {
+  const s = h("div", { class: "stack" });
+  s.append(h("div", { class: "stats" },
+    h("div", { class: "stat" }, h("b", null, String(profile.practiceDays.length)), "練習天數"),
+    h("div", { class: "stat" }, h("b", null, String(streak())), "連續天數"),
+    h("div", { class: "stat" }, h("b", null, String(cards.filter(c => c.type === "word").length)), "學過的單字")));
+  const pc = h("div", { class: "card" }, h("h2", null, "我的程度：" + (profile.level || "未測驗")));
+  if (profile.levelZh) pc.append(h("div", { class: "muted" }, profile.levelZh));
+  if (profile.strengths.length) pc.append(h("div", null, "優點：" + profile.strengths.join("、")));
+  if ((profile.weakZh || []).length) pc.append(h("div", null, "要加強：" + profile.weakZh.join("、")));
+  if (profile.note) pc.append(h("div", { class: "small" }, profile.note));
+  if (profile.levelHistory.length) pc.append(h("div", { class: "small" }, "變化：" + profile.levelHistory.slice(-8).map(x => x.date.slice(5).replace("-", "/") + " " + x.level).join(" → ")));
+  s.append(pc);
+  const cats = {}; cards.filter(c => c.type === "sentence").forEach(c => cats[c.category || "其他"] = (cats[c.category || "其他"] || 0) + 1);
+  const top = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+  if (top.length) s.append(h("div", { class: "card" }, h("h2", null, "常犯的錯誤"), h("div", { class: "row" }, top.map(([k, n]) => h("span", { class: "chip" }, k + " " + n)))));
+  const lc = h("div", { class: "card" }, h("h2", null, "練習紀錄"));
+  if (!sessions.length) lc.append(h("div", { class: "muted" }, "還沒有紀錄。練習結束時按「結束練習」就會存下來。"));
+  sessions.slice(0, 60).forEach(x => {
+    lc.append(h("details", { class: "sess" },
+      h("summary", null, x.date.slice(5).replace("-", "/") + "・" + x.topic + "・說了 " + x.total + " 句" + (x.mistakes ? "，修正 " + x.mistakes : "")),
+      x.summary ? h("div", { class: "small", style: "padding:6px 0" }, x.summary) : null,
+      x.turns.map(t => h("div", { class: "turn" }, (t.r === "ai" ? tName() + "：" : "你：") + t.t, t.c ? h("div", { style: "color:var(--green)" }, "→ " + t.c) : null))));
+  });
+  s.append(lc);
+  return s;
+}
+
+function viewSettings() {
+  const s = h("div", { class: "stack" });
+  const key = h("input", { type: "password", id: "key", placeholder: "貼上 API 金鑰（AIza…）", value: settings.apiKey, autocomplete: "off" });
+  const st = h("div", { class: "small" }, settings.model ? "目前的 AI 模型：" + settings.model : "");
+  const test = h("button", { type: "button", class: "btn primary" }, "儲存並測試連線");
+  test.addEventListener("click", async () => {
+    const k = key.value.trim(); if (!k) { toast("請先貼上金鑰。"); return; }
+    test.disabled = true; st.textContent = "測試中…";
+    try { const m = await detectModel(k); if (!m) throw new Error("找不到可用的模型。"); settings.apiKey = k; settings.model = m; LS.set("settings", settings); st.textContent = "✅ 連線成功！AI 模型：" + m; }
+    catch (e) { st.textContent = "❌ " + e.message; }
+    test.disabled = false;
+  });
+  s.append(h("div", { class: "card" }, h("h2", null, "Gemini API 金鑰"), key, h("div", { class: "row" }, test), st,
+    h("div", { class: "small" }, "金鑰只存在這支手機的瀏覽器裡，不會傳到 Google 以外的地方。"),
+    h("details", null, h("summary", null, "怎麼取得金鑰？"), h("ol", { class: "steps" },
+      h("li", null, "用私人 Google 帳號登入 aistudio.google.com"),
+      h("li", null, "按「Get API key」→「Create API key」"),
+      h("li", null, "複製金鑰，貼到上面"),
+      h("li", null, "不要開啟付費（Billing），就不會被收費")))));
+  const avp = h("div", { class: "avpick" }, Object.keys(AV).map(k => {
+    const b = h("button", { type: "button", "aria-pressed": String(settings.avatar === k), onclick: () => { settings.avatar = k; LS.set("settings", settings); render(); } });
+    b.append(h("div", { class: "avatar", html: avatarSVG(k) }), h("b", null, AV[k].name), h("span", { class: "small" }, AV[k].who)); return b;
+  }));
+  s.append(h("div", { class: "card" }, h("h2", null, "老師"), avp));
+  const FEMALE = /Samantha|Ava|Allison|Nicky|Susan|Victoria|Karen|Moira|Tessa|Serena|Kate|Martha|Zoe|Joelle|Catherine|Fiona|Veena|Isha|Sandy|Shelley|Flo|Grandma|Aria|Jenny|Michelle|Emma|Ana|Sonia|Libby|Natasha|Zira|Hazel|Female/i;
+  const MALE = /Aaron|Fred|Daniel|Arthur|Gordon|Oliver|Tom|Alex|Evan|Reed|Rishi|Nathan|Lee|Ralph|Albert|Eddy|Rocko|Grandpa|Junior|Guy|Andrew|Brian|Christopher|Eric|Roger|Steffan|Ryan|Thomas|William|David|Mark|George|Male/i;
+  const gender = (v) => FEMALE.test(v.name) ? "女聲" : MALE.test(v.name) ? "男聲" : "";
+  const vs = h("select", { id: "voice" }, h("option", { value: "" }, "自動選擇（女聲 Samantha 等）"), voicesCache.map(v => h("option", { value: v.voiceURI, selected: v.voiceURI === settings.voice }, (gender(v) ? gender(v) + "・" : "") + v.name.replace(/^Microsoft\s+/i, "").replace(/\s*-\s*English.*$/i, "").replace(/^Google\s+/i, "Google ") + "（" + v.lang.replace("_", "-") + "）")));
+  vs.addEventListener("change", () => { settings.voice = vs.value; LS.set("settings", settings); say("Hello! This is my voice."); });
+  const rate = h("input", { type: "range", min: "0.6", max: "1.2", step: "0.05", value: String(settings.rate), style: "width:100%;accent-color:var(--accent)" });
+  const rv2 = h("span", null, Number(settings.rate).toFixed(2));
+  rate.addEventListener("input", () => { settings.rate = Number(rate.value); rv2.textContent = settings.rate.toFixed(2); LS.set("settings", settings); });
+  const chk = (k, label) => { const i = h("input", { type: "checkbox", checked: !!settings[k] }); i.addEventListener("change", () => { settings[k] = i.checked; LS.set("settings", settings); }); return h("label", { class: "chk" }, i, label); };
+  s.append(h("div", { class: "card" }, h("h2", null, "聲音"), vs, h("div", { class: "row" }, "語速", rv2), rate,
+    h("button", { type: "button", class: "btn", onclick: () => say("Hello! Can you hear me clearly? Let's practice English together.") }, "🔊 測試發音"),
+    h("div", { class: "small" }, "聽不到時：確認 iPhone 左側的靜音開關沒有打開、音量有調大。更自然的聲音：iPhone「設定 > 輔助使用 > 朗讀內容 > 聲音 > 英文」下載 Ava（加強版）等，再到這裡選。"),
+    chk("autoSpeak", "自動朗讀（修正句＋回覆）"), chk("autoSend", "說完自動送出")));
+  s.append(h("div", { class: "card" }, h("h2", null, "Gemini Live 用的老師設定"), h("div", { class: "muted" }, "會帶入你的程度、弱點和今天的課程。"), h("button", { type: "button", class: "btn", onclick: copyTeacher }, "複製老師設定"), h("div", { id: "teacher-box" })));
+  const exp = h("button", { type: "button", class: "btn" }, "備份（下載檔案）");
+  exp.addEventListener("click", () => {
+    const data = { app: "mochi-english", v: 1, at: new Date().toISOString(), settings: Object.assign({}, settings, { apiKey: "" }), profile, sessions, cards, lesson, textbook };
+    const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+    const a = h("a", { href: URL.createObjectURL(blob), download: "mochi-english-backup-" + todayStr() + ".json" }); document.body.append(a); a.click(); a.remove();
+    toast("備份檔已下載（不含 API 金鑰）。可存到 iCloud 雲碟。");
+  });
+  const imp = h("button", { type: "button", class: "btn", onclick: () => $("import-file").click() }, "還原");
+  const wipe = h("button", { type: "button", class: "btn danger" }, "刪除所有紀錄");
+  wipe.addEventListener("click", () => {
+    if (wipe.dataset.arm !== "1") { wipe.dataset.arm = "1"; wipe.textContent = "確定要全部刪除？（無法復原）"; setTimeout(() => { wipe.dataset.arm = ""; wipe.textContent = "刪除所有紀錄"; }, 5000); return; }
+    profile = { level: "", levelZh: "", weak: [], strengths: [], note: "", nextFocus: "", stage: "travel", topicIdx: 0, day: 1, levelHistory: [], placementDone: false, practiceDays: [] };
+    sessions = []; cards = []; lesson = null; current = null; textbook = ""; saveAll(); toast("已刪除（API 金鑰和老師設定保留）。"); go("today");
+  });
+  s.append(h("div", { class: "card" }, h("h2", null, "資料"), h("div", { class: "muted" }, "紀錄只存在這支手機。清除 Safari 的網站資料會不見，建議每週備份一次。"), h("div", { class: "row" }, exp, imp), wipe,
+    h("div", { class: "small" }, "單字 " + cards.filter(c => c.type === "word").length + "・句子 " + cards.filter(c => c.type === "sentence").length + "・練習 " + sessions.length + " 次")));
+  return s;
+}
+
+$("import-file").addEventListener("change", async (e) => {
+  const f = e.target.files && e.target.files[0]; e.target.value = ""; if (!f) return;
+  try {
+    const d = JSON.parse(await f.text());
+    if (d.app !== "mochi-english") throw 0;
+    const key = settings.apiKey, model = settings.model;
+    settings = Object.assign({}, DEF_SETTINGS, d.settings || {}, { apiKey: key, model });
+    profile = Object.assign(profile, d.profile || {}); sessions = d.sessions || []; cards = d.cards || []; lesson = d.lesson || null; textbook = d.textbook || "";
+    saveAll(); toast("還原完成！"); go("today");
+  } catch { toast("這個檔案不是 Mochi 英文教室的備份。"); }
+});
+
+/* ================= Wiring ================= */
+document.querySelectorAll("#tabbar button").forEach(b => b.addEventListener("click", () => { if (b.dataset.v === "review") rv = { list: [], i: 0, flipped: false }; go(b.dataset.v); }));
+$("mic").addEventListener("click", toggleMic);
+$("send").addEventListener("click", sendTurn);
+$("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendTurn(); } });
+$("hint-btn").addEventListener("click", getHints);
+$("stop-say").addEventListener("click", stopSay);
+$("end-btn").addEventListener("click", () => {
+  const b = $("end-btn");
+  if (b.dataset.arm !== "1") { b.dataset.arm = "1"; b.textContent = "確定結束並存檔？"; setTimeout(() => { b.dataset.arm = ""; b.textContent = "結束練習"; }, 4000); return; }
+  b.dataset.arm = ""; b.textContent = "結束練習"; stopSay(); finishSession(false);
+});
+
+render();
+})();
+</script>
+</body>
+</html>
