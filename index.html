@@ -196,15 +196,16 @@ const LS = {
   get(k, d) { try { const v = localStorage.getItem("me." + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem("me." + k, JSON.stringify(v)); return true; } catch { toast("手機的儲存空間不足，請到「設定」備份後刪除舊紀錄。"); return false; } }
 };
-const DEF_SETTINGS = { apiKey: "", model: "", avatar: "cat", rate: 0.9, voice: "", autoSpeak: true, autoSend: true };
+const DEF_SETTINGS = { apiKey: "", model: "", avatar: "cat", rate: 0.9, voice: "", autoSpeak: true, autoSend: true, ttsEngine: "gemini", gVoice: "Kore", ttsModel: "", speakReason: true, handsFree: true, pauseSec: 3 };
 let settings = Object.assign({}, DEF_SETTINGS, LS.get("settings", {}));
-let profile = Object.assign({ level: "", levelZh: "", weak: [], strengths: [], note: "", nextFocus: "", stage: "travel", topicIdx: 0, day: 1, levelHistory: [], placementDone: false, practiceDays: [] }, LS.get("profile", {}));
+let profile = Object.assign({ level: "", levelZh: "", weak: [], strengths: [], note: "", nextFocus: "", stage: "travel", topicIdx: 0, day: 1, tbDay: 1, levelHistory: [], placementDone: false, practiceDays: [] }, LS.get("profile", {}));
 let sessions = LS.get("sessions", []);
 let cards = LS.get("cards", []);
 let lesson = LS.get("lesson", null);
 let textbook = LS.get("textbook", "");
 let current = LS.get("current", null);
-const saveAll = () => { LS.set("settings", settings); LS.set("profile", profile); LS.set("sessions", sessions); LS.set("cards", cards); LS.set("lesson", lesson); LS.set("textbook", textbook); LS.set("current", current); };
+let tbook = LS.get("tbook", null); // the learner's own textbook data, imported from a private file on the phone
+const saveAll = () => { LS.set("tbook", tbook); LS.set("settings", settings); LS.set("profile", profile); LS.set("sessions", sessions); LS.set("cards", cards); LS.set("lesson", lesson); LS.set("textbook", textbook); LS.set("current", current); };
 
 /* ================= Data ================= */
 const STAGES = {
@@ -286,7 +287,9 @@ const tName = () => AV[settings.avatar].name;
 /* ================= Speech out (iPhone voice) ================= */
 const synth = ("speechSynthesis" in window) ? window.speechSynthesis : null;
 let voicesCache = [];
-function loadVoices() { if (synth) voicesCache = synth.getVoices().filter(v => /^en[-_]/i.test(v.lang)); }
+// iPhone novelty / robotic voices are hidden from the list.
+const NOVELTY = /Albert|Bad News|Bahh|Bells|Boing|Bubbles|Cellos|Good News|Jester|Organ|Superstar|Trinoids|Whisper|Wobble|Zarvox|Grandma|Grandpa|Eddy|Flo\b|Reed|Rocko|Sandy|Shelley|Junior|Ralph|Fred|Kathy|Princess|Deranged|Hysterical/i;
+function loadVoices() { if (synth) voicesCache = synth.getVoices().filter(v => /^en[-_]/i.test(v.lang) && !NOVELTY.test(v.name) && !/[぀-ヿ㐀-鿿]/.test(v.name)); }
 if (synth) { loadVoices(); synth.addEventListener?.("voiceschanged", () => { loadVoices(); if (view === "settings") render(); }); }
 let warnedNoVoice = false;
 function pickVoice() {
@@ -304,57 +307,174 @@ let unlocked = false;
 document.addEventListener("touchend", unlockAudio, { passive: true });
 document.addEventListener("click", unlockAudio);
 function unlockAudio() {
+  getCtx();
   if (unlocked || !synth) return; unlocked = true;
   try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; synth.speak(u); } catch {}
 }
+
+/* ---- Gemini natural voice (same API key). Falls back to the device voice on any error. ---- */
+const GVOICES = [["Kore", "女聲・Kore（沉穩）"], ["Aoede", "女聲・Aoede（輕快）"], ["Leda", "女聲・Leda（年輕）"], ["Zephyr", "女聲・Zephyr（明亮）"],
+  ["Puck", "男聲・Puck（活潑）"], ["Charon", "男聲・Charon（穩重）"], ["Fenrir", "男聲・Fenrir（有活力）"], ["Orus", "男聲・Orus（堅定）"]];
+let actx = null, gSrc = null, gCtl = null, gDown = false, sayToken = 0;
+const gCache = new Map();
+function getCtx() {
+  try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch {}
+  if (!actx) { const C = window.AudioContext || window.webkitAudioContext; if (!C) return null; try { actx = new C(); } catch { return null; } }
+  if (actx.state === "suspended") actx.resume().catch(() => {});
+  return actx;
+}
+async function detectTtsModel() {
+  const res = await fetch(API + "models?pageSize=200", { headers: { "x-goog-api-key": settings.apiKey } });
+  if (!res.ok) throw await apiError(res);
+  const data = await res.json();
+  const ver = (n) => { const m = n.match(/gemini-(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
+  const names = (data.models || []).filter(m => (m.supportedGenerationMethods || []).includes("generateContent"))
+    .map(m => m.name.replace(/^models\//, "")).filter(n => /tts/i.test(n));
+  names.sort((a, b) => (Number(/flash/.test(b)) - Number(/flash/.test(a))) || (ver(b) - ver(a)));
+  return names[0] || "";
+}
+async function geminiAudio(text, signal) {
+  const ck = settings.gVoice + "|" + settings.rate + "|" + text;
+  if (gCache.has(ck)) return gCache.get(ck);
+  if (!settings.ttsModel) { settings.ttsModel = await detectTtsModel(); LS.set("settings", settings); if (!settings.ttsModel) throw new Error("找不到語音模型"); }
+  const style = Number(settings.rate) < 0.85 ? "slowly and very clearly" : "clearly, at a natural relaxed pace";
+  const res = await fetch(API + "models/" + settings.ttsModel + ":generateContent", {
+    method: "POST", signal, headers: { "Content-Type": "application/json", "x-goog-api-key": settings.apiKey },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: "Say this in friendly, natural American English, " + style + ":\n" + text }] }],
+      generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: settings.gVoice } } } }
+    })
+  });
+  if (!res.ok) { if (res.status === 404) { settings.ttsModel = ""; LS.set("settings", settings); } throw await apiError(res); }
+  const data = await res.json();
+  const part = ((data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || []).find(p => p.inlineData && p.inlineData.data);
+  if (!part) throw new Error("沒有收到聲音");
+  const ctx = getCtx(); if (!ctx) throw new Error("這個瀏覽器不能播放");
+  const rate = parseInt(((part.inlineData.mimeType || "").match(/rate=(\d+)/) || [])[1] || "24000", 10);
+  const bin = atob(part.inlineData.data); const n = bin.length >> 1;
+  const buf = ctx.createBuffer(1, n, rate); const ch = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) { let v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8); if (v >= 32768) v -= 65536; ch[i] = v / 32768; }
+  if (gCache.size > 60) gCache.delete(gCache.keys().next().value);
+  gCache.set(ck, buf);
+  return buf;
+}
+async function gSay(text) {
+  stopSay();
+  const tok = ++sayToken;
+  const ctl = new AbortController(); gCtl = ctl;
+  try {
+    const buf = await geminiAudio(text, ctl.signal);
+    if (ctl.signal.aborted) return;
+    const ctx = getCtx(); const src = ctx.createBufferSource();
+    src.buffer = buf; src.connect(ctx.destination);
+    src.onended = () => { if (gSrc === src && tok === sayToken) { gSrc = null; setTalking(false); afterSpeak(); } };
+    gSrc = src; setTalking(true); src.start();
+  } catch (e) {
+    if (ctl.signal.aborted) return;
+    setTalking(false); gDown = true; setTimeout(() => { gDown = false; }, 10 * 60 * 1000);
+    toast("Gemini 語音暫時不能用（" + (e.message || "錯誤") + "），先改用 iPhone 的語音。");
+    deviceSay([text]);
+  }
+}
 function say(texts) {
+  const list = (Array.isArray(texts) ? texts : [texts]).filter(Boolean);
+  if (!list.length) return;
+  if (settings.ttsEngine === "gemini" && settings.apiKey && !gDown && getCtx()) { gSay(list.join("\n\n")); return; }
+  deviceSay(list);
+}
+function deviceSay(texts) {
   if (!synth) { toast("這個瀏覽器不能朗讀，請用 iPhone 的 Safari 開啟。"); return; }
   const list = (Array.isArray(texts) ? texts : [texts]).filter(Boolean);
   if (!list.length) return;
   synth.cancel();
+  const tok = ++sayToken;
   const v = pickVoice();
   list.forEach((t, i) => {
     const u = new SpeechSynthesisUtterance(t);
     u.lang = "en-US"; if (v) { u.voice = v; u.lang = v.lang; }
     u.rate = Number(settings.rate) || 0.9;
     u.onstart = () => setTalking(true);
-    u.onend = () => { if (i === list.length - 1) setTalking(false); };
+    u.onend = () => { if (i === list.length - 1 && tok === sayToken) { setTalking(false); afterSpeak(); } };
     u.onerror = () => setTalking(false);
     synth.speak(u);
   });
 }
-function stopSay() { try { synth && synth.cancel(); } catch {} setTalking(false); }
+function stopSay() {
+  sayToken++;
+  try { gCtl && gCtl.abort(); } catch {} gCtl = null;
+  try { gSrc && gSrc.stop(); } catch {} gSrc = null;
+  try { synth && synth.cancel(); } catch {}
+  setTalking(false);
+}
 const SPK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>';
 const spk = (text, label) => h("button", { type: "button", class: "spk", "aria-label": label || "朗讀", html: SPK, onclick: (e) => { e.stopPropagation(); say(text); } });
 
 /* ================= Speech in (iPhone Safari) ================= */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null, recOn = false, recText = "";
+// Keeps listening through short pauses; sends only after the learner has been silent for pauseSec seconds.
+let rec = null, recWanted = false, silenceTimer = null, noSpeechTimer = null, micBlocked = false;
 function toggleMic() {
   if (!SR) { toast("這裡不能用語音辨識。請點輸入框，按鍵盤右下角的 🎤 說英文（鍵盤語言請切成 English）。"); $("input").focus(); return; }
-  if (recOn) { try { rec.stop(); } catch {} return; }
-  if (busy) return;
+  if (recWanted) { finishListening(true); return; }
+  micBlocked = false;
+  startListening();
+}
+function startListening() {
+  if (!SR || micBlocked || busy || !current || recWanted) return;
   stopSay();
-  rec = new SR(); rec.lang = "en-US"; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
-  recText = ""; $("input").value = "";
+  recWanted = true; $("input").value = "";
+  clearTimeout(noSpeechTimer);
+  noSpeechTimer = setTimeout(() => { if (recWanted && !($("input").value || "").trim()) { finishListening(false); toast("沒有聽到聲音，要說話時請按 🎤。"); } }, 20000);
+  openRec(); requestWake();
+}
+function openRec() {
+  const base = ($("input").value || "").trim();
+  rec = new SR(); rec.lang = "en-US"; rec.interimResults = true; rec.continuous = true; rec.maxAlternatives = 1;
   rec.onresult = (e) => {
     let fin = "", tmp = "";
     for (let i = 0; i < e.results.length; i++) { const r = e.results[i]; if (r.isFinal) fin += r[0].transcript; else tmp += r[0].transcript; }
-    recText = fin; $("input").value = (fin + " " + tmp).trim();
+    $("input").value = [base, fin, tmp].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => finishListening(true), (Number(settings.pauseSec) || 3) * 1000);
   };
   rec.onerror = (e) => {
-    if (e.error === "not-allowed" || e.error === "service-not-allowed") toast("沒有允許使用麥克風。請到 iPhone 的「設定 > Safari > 麥克風」允許，或用鍵盤的 🎤。");
-    else if (e.error === "no-speech") toast("沒有聽到聲音，請再按一次麥克風。");
-    else if (e.error !== "aborted") toast("語音辨識出錯（" + e.error + "），可以改用鍵盤的 🎤。");
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") { micBlocked = true; recWanted = false; updateMic(); toast("沒有允許使用麥克風。請到 iPhone 的「設定 > Safari > 麥克風」允許，或用鍵盤的 🎤。"); }
+    else if (e.error !== "aborted" && e.error !== "no-speech") toast("語音辨識出錯（" + e.error + "），可以改用鍵盤的 🎤。");
   };
   rec.onend = () => {
-    recOn = false; updateMic();
-    const text = ($("input").value || "").trim();
-    if (settings.autoSend && text) sendTurn();
+    // iPhone ends recognition by itself after a while; reopen it while the learner may still be talking.
+    if (recWanted) setTimeout(() => { if (recWanted) { try { openRec(); } catch { finishListening(true); } } }, 150);
+    else updateMic();
   };
-  try { rec.start(); recOn = true; updateMic(); } catch { toast("麥克風無法啟動，請再按一次。"); }
+  try { rec.start(); } catch { recWanted = false; toast("麥克風無法啟動，請再按一次 🎤。"); }
+  updateMic();
 }
-function updateMic() { const m = $("mic"); m.classList.toggle("on", recOn); m.setAttribute("aria-label", recOn ? "說完了" : "開始說英文"); }
+function finishListening(send) {
+  clearTimeout(silenceTimer); clearTimeout(noSpeechTimer);
+  const was = recWanted; recWanted = false;
+  try { rec && rec.stop(); } catch {}
+  updateMic();
+  if (was && send && settings.autoSend && ($("input").value || "").trim()) sendTurn();
+}
+function updateMic() {
+  const m = $("mic"); m.classList.toggle("on", recWanted); m.setAttribute("aria-label", recWanted ? "說完了，送出" : "開始說英文");
+  $("input").placeholder = recWanted ? "聆聽中…說完停頓 " + (Number(settings.pauseSec) || 3) + " 秒會自動送出" : "說英文或打字（也可打中文）";
+}
+// Hands-free: after the teacher finishes talking, start listening again.
+function afterSpeak() {
+  if (settings.handsFree && view === "chat" && current && !busy && SR && !recWanted && !micBlocked && document.visibilityState === "visible")
+    setTimeout(() => { if (!busy && !recWanted && view === "chat" && current) startListening(); }, 400);
+}
+// Keep the screen on during practice (the iPhone pauses web apps when the screen turns off).
+let wakeLock = null;
+async function requestWake() {
+  try { if ("wakeLock" in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => { wakeLock = null; }); } } catch {}
+}
+function releaseWake() { try { wakeLock && wakeLock.release(); } catch {} wakeLock = null; }
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && view === "chat" && current) requestWake();
+  if (document.visibilityState === "hidden" && recWanted) finishListening(false);
+});
 
 /* ================= Gemini API ================= */
 const API = "https://generativelanguage.googleapis.com/v1beta/";
@@ -412,13 +532,26 @@ function learnerContext() {
 function knownWords() { return cards.filter(c => c.type === "word").slice(-120).map(c => c.word); }
 
 /* ================= Lesson ================= */
-function curTopic() { const st = STAGES[profile.stage] || STAGES.travel; return { stage: profile.stage, stageName: st.name, topic: st.topics[profile.topicIdx % st.topics.length] }; }
+function tbEntry() { if (!tbook || !Array.isArray(tbook.days)) return null; const d = profile.tbDay || 1; return tbook.days.find(x => x.day === d) || null; }
+function tbLines(e) {
+  return [
+    "Today's lesson follows the learner's textbook (Day " + e.day + ", " + (e.part === "旅行" ? "travel" : "small talk") + " part).",
+    "Key phrase (keep it exactly): " + e.phrase + "  /  Japanese meaning: " + e.phrase_ja,
+    "Pattern to master: " + e.pattern + "  /  " + e.pattern_ja,
+    "Textbook examples: " + e.examples.map(x => x.en).join(" | "),
+    "Design a role-play where the learner naturally uses this pattern several times with different words. In phrase_tip_zh, explain in your own words, in Traditional Chinese, when and how to use the pattern, including one nuance or common mistake."
+  ].join("\n");
+}
+function curTopic() {
+  const e = tbEntry();
+  if (e) return { stage: "textbook", stageName: "講義・" + (e.part === "旅行" ? "旅行篇" : "閒聊篇"), topic: "Day " + e.day + "：" + e.phrase, tb: e };
+  const st = STAGES[profile.stage] || STAGES.travel; return { stage: profile.stage, stageName: st.name, topic: st.topics[profile.topicIdx % st.topics.length] }; }
 async function makeLesson() {
   const t = curTopic();
   const prompt = [
     "You are an English coach planning today's short speaking lesson.", learnerContext(),
-    "Course stage: " + t.stage + ". Today's topic (Chinese): " + t.topic + ". Day " + profile.day + ".",
-    textbook ? "The learner is also studying this phrase from their textbook today; build the lesson around it if it fits: " + JSON.stringify(textbook) : "",
+    t.tb ? tbLines(t.tb) : "Course stage: " + t.stage + ". Today's topic (Chinese): " + t.topic + ". Day " + profile.day + ".",
+    textbook && !t.tb ?"The learner is also studying this phrase from their textbook today; build the lesson around it if it fits: " + JSON.stringify(textbook) : "",
     "Words the learner already has (do NOT reuse): " + JSON.stringify(knownWords()),
     "Pick ONE key phrase pattern that is very useful in this situation, and exactly 3 new words or short expressions slightly above the learner's level that fit the topic.",
     "For each word give one emoji that pictures its meaning.",
@@ -434,7 +567,12 @@ async function makeLesson() {
     phrase: S(r.phrase), phrase_zh: S(r.phrase_zh), phrase_tip_zh: S(r.phrase_tip_zh), phrase_example: S(r.phrase_example),
     words, opener: S(r.opener) || "Hi! Shall we start?", opener_zh: S(r.opener_zh)
   };
+  if (t.tb) {
+    Object.assign(lesson, { tbDay: t.tb.day, phrase: t.tb.phrase, phrase_ja: t.tb.phrase_ja, pattern: t.tb.pattern, examples: t.tb.examples, phrase_example: (t.tb.examples[0] || {}).en || "" });
+    if (!cards.some(c => c.type === "phrase" && c.en === lesson.phrase)) cards.push({ id: uid(), type: "phrase", en: lesson.phrase, ja: lesson.phrase_ja, zh: lesson.phrase_zh, pattern: lesson.pattern, step: 0, due: addDays(1), created: Date.now() });
+  }
   words.forEach(w => addWordCard(w));
+  LS.set("cards", cards);
   LS.set("lesson", lesson);
 }
 function addWordCard(w) {
@@ -464,13 +602,37 @@ function startSession(mode) {
   if (settings.autoSpeak) say(current.turns[0].text);
 }
 
+const CORRECTION_RULES = "You are a real English teacher, so correct EVERY real mistake, even small ones: grammar, tense, articles (a/the), plurals, prepositions, word choice, missing words, word order. Set ok=true ONLY if the sentence is fully correct AND natural. If it is understandable but has any error, ok=false. If it is correct but a native speaker would clearly say it differently, ok=false with category 說法不自然. If the message is wholly or partly in Chinese or Japanese, give the English for what they meant (category 中文轉英文). explain_zh must say clearly what was wrong and why, in Traditional Chinese (Taiwan), as short numbered points; explain_en says the same in 1-2 short, simple spoken sentences, like a teacher talking (no numbering), e.g. 'We use went because it happened last weekend.'";
+function teachLines(r, reply) {
+  if (r.ok) return ["Nice, that's correct!", reply].filter(Boolean);
+  const L = ["A better way to say it is: " + r.corrected];
+  if (settings.speakReason && r.explain_en) L.push(r.explain_en);
+  if (settings.speakReason && r.natural && r.natural !== r.corrected) L.push("You could also say: " + r.natural);
+  if (reply) L.push(reply);
+  return L;
+}
+function normResult(r0, said) {
+  const r = { ok: r0.ok === true, corrected: S(r0.corrected) || said, natural: S(r0.natural), explain_en: S(r0.explain_en), explain_zh: S(r0.explain_zh), category: S(r0.category), praise_zh: S(r0.praise_zh) };
+  if (!r.ok && !CATEGORIES.includes(r.category)) r.category = "其他";
+  return r;
+}
+async function checkOnly(said, question) {
+  const r0 = await gemini([
+    learnerContext(), "The question was: " + JSON.stringify(question),
+    "The learner answered (from speech recognition; ignore capitalization, punctuation and obvious recognition glitches):", JSON.stringify(said),
+    CORRECTION_RULES,
+    "Reply with ONLY JSON:",
+    '{"ok":true/false,"corrected":"corrected sentence (same as learner if ok)","natural":"how a native speaker would naturally say it","explain_en":"...","explain_zh":"...","category":"one of ' + CATEGORIES.join("/") + ' or empty if ok","praise_zh":"if ok, one short encouraging sentence in Traditional Chinese"}'
+  ].join("\n"), 0.2);
+  return normResult(r0, said);
+}
 function convPrompt(said) {
   const hist = current.turns.slice(0, -1).slice(-14).map(t => (t.role === "ai" ? "Coach: " : "Learner: ") + t.text).join("\n");
   const L = current.mode === "lesson" && lesson ? lesson : null;
   return [
     "You are " + tName() + ", a warm, curious English conversation coach" + (settings.avatar === "cat" ? " (a friendly cat character)" : "") + ". You talk like a real friend: natural, relaxed spoken English, short turns.",
     learnerContext(),
-    L ? "Today's role-play: " + L.scene_zh + " You play: " + L.role + ". Key phrase to practice: " + L.phrase + ". Today's words to weave in naturally: " + L.words.map(w => w.word).join(", ") + "." : "Free conversation. If the learner has nothing to say or gives a very short answer, YOU bring up an interesting, everyday topic suited to them (work life in Japan, food, travel, hobbies, seasons) and ask an easy question.",
+    L ? "Today's role-play: " + L.scene_zh + " You play: " + L.role + ". Key phrase to practice: " + L.phrase + (L.pattern ? " (pattern: " + L.pattern + "; give the learner several chances to use it with different words)" : "") + ". Today's words to weave in naturally: " + L.words.map(w => w.word).join(", ") + "." : "Free conversation. If the learner has nothing to say or gives a very short answer, YOU bring up an interesting, everyday topic suited to them (work life in Japan, food, travel, hobbies, seasons) and ask an easy question.",
     textbook ? "The learner is also practicing this textbook phrase: " + JSON.stringify(textbook) + ". Create chances for them to use it." : "",
     "Words the learner already knows (for reference): " + JSON.stringify(knownWords().slice(-40)),
     "",
@@ -479,7 +641,7 @@ function convPrompt(said) {
     "The learner just said (from speech recognition; ignore capitalization, punctuation and obvious recognition glitches):", JSON.stringify(said),
     "",
     "Do this:",
-    "1. Check the learner's message for grammar, word choice and naturalness, matched to their level (do not nitpick tiny style points for beginners). If it is in Chinese, give the English for what they meant.",
+    "1. Check the learner's latest message. " + CORRECTION_RULES,
     "2. Reply in character with 1-3 short natural sentences, react to what they said, and usually end with a question. If the learner seems stuck, offer an easy follow-up question or a new topic.",
     "3. About once every 3-4 turns, introduce ONE new useful word or expression that fits the moment (slightly above their level, not in the known list), and use it in your reply. Otherwise new_word is null.",
     "Reply with ONLY JSON:",
@@ -488,6 +650,7 @@ function convPrompt(said) {
 }
 
 async function sendTurn() {
+  if (recWanted) finishListening(false);
   const inp = $("input"); const said = (inp.value || "").trim();
   if (!said || busy || !current) return;
   inp.value = ""; hints = null; stopSay();
@@ -515,19 +678,27 @@ async function runTurn(idx) {
     LS.set("current", current);
     setMood(r.ok ? "happy" : (r.mood === "thinking" ? "thinking" : "normal"));
     renderChat();
-    if (settings.autoSpeak) say(r.ok ? [r.reply] : [r.corrected, r.reply]);
+    if (settings.autoSpeak) say(teachLines(r, r.reply)); else afterSpeak();
   } catch (e) {
     turn.pending = false; turn.error = e.message || "發生錯誤，請再試一次。"; setMood("normal"); renderChat();
   } finally { busy = false; renderChatTools(); }
 }
 
 async function placementNext() {
+  // Correct each answer, the same way as in normal conversation.
+  const meTurn = current.turns[current.turns.length - 1];
+  const prevQ = [...current.turns].reverse().find(t => t.role === "ai");
+  let fix = null;
+  busy = true; meTurn.pending = true; setMood("thinking"); renderChat();
+  try { fix = await checkOnly(meTurn.text, prevQ ? prevQ.text : ""); meTurn.result = fix; if (!fix.ok) addSentenceCard(meTurn.text, fix); }
+  catch (e) { toast(e.message || "批改失敗"); }
+  finally { meTurn.pending = false; busy = false; LS.set("current", current); renderChatTools(); }
   const answered = current.turns.filter(t => t.role === "me").length;
   if (answered < PLACEMENT_Q.length) {
     const q = PLACEMENT_Q[answered];
     current.turns.push({ role: "ai", text: q.en, zh: q.zh });
-    LS.set("current", current); setMood("happy"); renderChat();
-    if (settings.autoSpeak) say(q.en);
+    LS.set("current", current); setMood(fix && !fix.ok ? "normal" : "happy"); renderChat();
+    if (settings.autoSpeak) say(fix ? [...teachLines(fix, ""), q.en] : [q.en]); else afterSpeak();
     return;
   }
   busy = true; current.turns.push({ role: "ai", text: "Thank you! Let me think about your level for a moment…", zh: "謝謝！我來評估一下你的程度…" }); setMood("thinking"); renderChat();
@@ -568,6 +739,8 @@ function applyLevel(r, fromPlacement) {
 
 async function finishSession(silent) {
   if (!current) return;
+  if (recWanted) finishListening(false);
+  releaseWake();
   const mine = current.turns.filter(t => t.role === "me" && (t.result || current.mode === "placement"));
   const sess = current;
   current = null; LS.set("current", null);
@@ -579,7 +752,11 @@ async function finishSession(silent) {
   };
   sessions.unshift(record); if (sessions.length > 300) sessions.length = 300;
   if (!profile.practiceDays.includes(record.date)) profile.practiceDays.push(record.date);
-  if (sess.mode === "lesson" && mine.length >= 5) { profile.topicIdx++; profile.day++; if (profile.topicIdx % 10 === 0) profile.stage = STAGE_ORDER[(STAGE_ORDER.indexOf(profile.stage) + 1) % 3]; lesson = null; LS.set("lesson", null); }
+  if (sess.mode === "lesson" && mine.length >= 5 && lesson && lesson.tbDay) {
+    profile.tbDay = lesson.tbDay + 1; profile.day++;
+    if (tbook && profile.tbDay > tbook.days.length) { profile.stage = "business"; profile.topicIdx = 0; }
+    lesson = null; LS.set("lesson", null);
+  } else if (sess.mode === "lesson" && mine.length >= 5) { profile.topicIdx++; profile.day++; if (profile.topicIdx % 10 === 0) profile.stage = STAGE_ORDER[(STAGE_ORDER.indexOf(profile.stage) + 1) % 3]; lesson = null; LS.set("lesson", null); }
   LS.set("sessions", sessions); LS.set("profile", profile);
   if (sess.mode !== "placement" && mine.length >= 3) {
     if (!silent) toast("練習已存檔，正在更新你的程度…");
@@ -605,7 +782,7 @@ function teacherPrompt() {
     "Please be my English conversation partner. Your name is " + tName() + (settings.avatar === "cat" ? ", a friendly cat English teacher." : ", a friendly English teacher."),
     "About me: I'm from Taiwan, my native language is Traditional Chinese, and I work at a Japanese company in product operations. My English level is about " + (profile.level || "A2-B1") + ".",
     profile.weak.length ? "My weak points: " + profile.weak.join(", ") + "." : "",
-    L ? "Today's topic: " + L.scene_zh + " You play: " + L.role + ". Today's key phrase: " + L.phrase + ". Today's new words: " + L.words.map(w => w.word).join(", ") + ". Please help me use them." : "Please choose interesting everyday topics for me and keep the conversation going.",
+    L ? "Today's topic: " + L.scene_zh + " You play: " + L.role + ". Today's key phrase: " + L.phrase + (L.pattern ? " (pattern: " + L.pattern + ")" : "") + ". Today's new words: " + L.words.map(w => w.word).join(", ") + ". Please help me use them." : "Please choose interesting everyday topics for me and keep the conversation going.",
     textbook ? "I'm also practicing this phrase: " + textbook + "." : "",
     "Rules:",
     "1. Talk naturally like a friend. Keep your turns short (1-3 sentences) and speak a little slowly and clearly.",
@@ -638,7 +815,11 @@ function grade(g) {
 
 /* ================= Views ================= */
 let view = "today";
-function go(v) { view = v; render(); $("view").scrollTop = 0; }
+function go(v) {
+  if (v !== "chat" && recWanted) finishListening(false);
+  view = v; render(); $("view").scrollTop = 0;
+  if (v === "chat" && current) requestWake();
+}
 function render() {
   $("top-av").innerHTML = avatarSVG(settings.avatar);
   const b = $("lv-badge"); b.hidden = !profile.level; b.textContent = "程度 " + profile.level;
@@ -646,7 +827,7 @@ function render() {
   document.querySelectorAll("#tabbar button").forEach(btn => btn.toggleAttribute("aria-current", false) || (btn.dataset.v === view && btn.setAttribute("aria-current", "page")));
   $("composer").hidden = view !== "chat" || !current;
   const v = $("view");
-  const fn = { today: viewToday, chat: viewChat, review: viewReview, log: viewLog, settings: viewSettings }[view];
+  const fn = { today: viewToday, chat: viewChat, review: viewReview, log: viewLog, settings: viewSettings, tblist: viewTbList }[view];
   v.replaceChildren(fn());
   if (view === "chat") { renderChatTools(); v.scrollTop = v.scrollHeight; }
 }
@@ -663,13 +844,16 @@ function viewToday() {
   if (!profile.placementDone) { s.append(h("div", { class: "card" }, h("h2", null, "程度測驗（約 5 分鐘）"), h("div", { class: "muted" }, "回答 5 個問題，用說的或打字都可以。答錯也沒關係，盡量說就好。"), h("button", { type: "button", class: "btn primary block", onclick: () => startSession("placement") }, "開始測驗"))); }
   // Lesson card
   const lc = h("div", { class: "card" });
-  lc.append(h("h3", null, t.stageName + "・Day " + profile.day));
+  lc.append(h("h3", null, t.stageName + "・Day " + (t.tb ? t.tb.day : profile.day)));
   if (lesson && lesson.date === todayStr() || lesson && lesson.day === profile.day) {
     const L = lesson;
     lc.append(h("h2", null, L.title_zh), L.scene_zh ? h("div", { class: "muted" }, L.scene_zh) : null);
-    lc.append(h("div", { class: "row" }, h("span", { class: "phrase" }, L.phrase), spk(L.phrase_example || L.phrase)),
-      h("div", null, L.phrase_zh), L.phrase_tip_zh ? h("div", { class: "small" }, "💡 " + L.phrase_tip_zh) : null,
-      L.phrase_example ? h("div", { class: "small" }, "例：" + L.phrase_example) : null);
+    lc.append(h("div", { class: "row" }, h("span", { class: "phrase" }, L.phrase), spk(L.phrase)),
+      h("div", null, L.phrase_zh), L.phrase_ja ? h("div", { class: "small" }, "日：" + L.phrase_ja) : null,
+      L.pattern ? h("div", null, "要記的句型：", h("b", null, L.pattern)) : null,
+      L.phrase_tip_zh ? h("div", { class: "small" }, "💡 " + L.phrase_tip_zh) : null);
+    if (L.examples && L.examples.length) lc.append(h("h3", null, "例句"), ...L.examples.map(x => h("div", { class: "word", style: "grid-template-columns:1fr auto" }, h("div", null, h("div", null, x.en), h("div", { class: "ex" }, x.ja)), spk(x.en))));
+    else if (L.phrase_example) lc.append(h("div", { class: "small" }, "例：" + L.phrase_example));
     lc.append(h("h3", null, "今天的 3 個新單字"), h("div", { class: "words" }, L.words.map(w => h("div", { class: "word" },
       h("div", { class: "emo", "aria-hidden": "true" }, w.emoji), h("div", null, h("div", { class: "w" }, w.word), h("div", null, w.zh), h("div", { class: "ex" }, w.example), h("div", { class: "ex" }, w.example_zh)), spk(w.word + ". " + w.example)))));
     lc.append(h("button", { type: "button", class: "btn primary block", onclick: () => startSession("lesson") }, "開始對話練習"));
@@ -683,11 +867,33 @@ function viewToday() {
   s.append(lc);
   const tb = h("input", { type: "text", id: "textbook", placeholder: "例：Excuse me, ~ please.", value: textbook });
   tb.addEventListener("change", () => { textbook = tb.value.trim(); LS.set("textbook", textbook); toast("已記下，課程和對話會用到這個句型。"); });
-  s.append(h("div", { class: "card" }, h("h2", null, "今天在講義學的句型（可不填）"), tb, h("div", { class: "small" }, "填了之後，產生課程和對話時會讓你練習這個句型。")));
+  if (!tbook) s.append(h("div", { class: "card" }, h("h2", null, "今天在講義學的句型（可不填）"), tb, h("div", { class: "small" }, "填了之後，產生課程和對話時會讓你練習這個句型。")));
+  if (tbook) s.append(h("button", { type: "button", class: "btn block", onclick: () => go("tblist") }, "📚 講義一覽（Day 1〜" + tbook.days.length + "）"));
   s.append(h("div", { class: "card" }, h("h2", null, "自由聊天"), h("div", { class: "muted" }, tName() + " 會主動找話題跟你聊。"), h("button", { type: "button", class: "btn block", onclick: () => startSession("free") }, "開始自由聊天")));
   return s;
 }
 
+function viewTbList() {
+  const s = h("div", { class: "stack" });
+  s.append(h("button", { type: "button", class: "btn", onclick: () => go("today") }, "← 回到今日"));
+  if (!tbook) { s.append(h("div", { class: "muted" }, "還沒有匯入講義。請到「設定 > 講義」匯入。")); return s; }
+  const cur = profile.tbDay || 1;
+  let lastPart = "";
+  tbook.days.forEach(e => {
+    if (e.part !== lastPart) { lastPart = e.part; s.append(h("h2", { style: "margin:8px 0 0;font-size:19px" }, e.part === "旅行" ? "旅行篇（Day 1〜30）" : "閒聊篇（Day 31〜60）")); }
+    const here = e.day === cur;
+    const body = h("div", { class: "stack", style: "gap:8px;margin-top:10px" },
+      h("div", { class: "row" }, h("span", { class: "phrase", style: "font-size:19px" }, e.phrase), spk(e.phrase)),
+      e.phrase_ja ? h("div", { class: "small" }, "日：" + e.phrase_ja) : null,
+      h("div", null, "要記的句型：", h("b", null, e.pattern)),
+      e.pattern_ja ? h("div", { class: "small" }, e.pattern_ja) : null,
+      ...(e.examples || []).map(x => h("div", { class: "word", style: "grid-template-columns:1fr auto" }, h("div", null, h("div", null, x.en), h("div", { class: "ex" }, x.ja)), spk(x.en))),
+      here ? null : h("button", { type: "button", class: "btn", onclick: () => { profile.tbDay = e.day; lesson = null; LS.set("lesson", null); LS.set("profile", profile); toast("已改成 Day " + e.day); go("today"); } }, "從這天開始上課"));
+    s.append(h("div", { class: "card", style: here ? "border-color:var(--accent);border-width:2px" : "" },
+      h("details", { open: here }, h("summary", { style: "cursor:pointer;font-size:17px" }, h("b", null, "Day " + e.day + (here ? "（目前）" : "")), "　" + e.phrase), body)));
+  });
+  return s;
+}
 function diffWords(a, b) {
   const norm = (w) => w.toLowerCase().replace(/[^a-z0-9']/g, "");
   const A = a.trim().split(/\s+/).filter(Boolean), B = b.trim().split(/\s+/).filter(Boolean), n = A.length, m = B.length;
@@ -737,7 +943,7 @@ function viewChat() {
       msgs.append(wrap);
       if (t.newWord) msgs.append(h("div", { class: "newword" }, h("div", { class: "emo", "aria-hidden": "true" }, t.newWord.emoji), h("div", null, h("b", null, "新單字：" + t.newWord.word), " " + t.newWord.zh, h("div", { class: "small" }, t.newWord.example)), spk(t.newWord.word + ". " + t.newWord.example)));
     } else {
-      msgs.append(h("div", { class: "msg me" }, h("div", { class: "bubble" }, t.text), current.mode === "placement" ? null : feedback(t, idx)));
+      msgs.append(h("div", { class: "msg me" }, h("div", { class: "bubble" }, t.text), feedback(t, idx)));
     }
   });
   s.append(msgs);
@@ -781,17 +987,20 @@ function viewReview() {
   }
   const c = rv.list[rv.i];
   const card = h("div", { class: "card flash" });
-  card.append(h("div", { class: "small" }, (rv.i + 1) + " / " + rv.list.length + "・" + (c.type === "word" ? "單字" : "句子")));
+  card.append(h("div", { class: "small" }, (rv.i + 1) + " / " + rv.list.length + "・" + (c.type === "word" ? "單字" : c.type === "phrase" ? "講義句型" : "句子")));
   if (c.type === "word") {
     card.append(h("div", { class: "big", "aria-hidden": "true" }, c.emoji), h("div", { class: "front" }, c.word), h("div", { class: "row", style: "justify-content:center" }, spk(c.word)));
     if (rv.flipped) card.append(h("div", null, c.zh), h("div", { class: "small" }, c.example), h("div", { class: "small" }, c.example_zh), h("div", { class: "row", style: "justify-content:center" }, spk(c.example)));
     else card.append(h("div", { class: "muted" }, "先想想意思，或用這個字說一句話"));
+  } else if (c.type === "phrase") {
+    card.append(h("div", { class: "muted" }, "用英文怎麼說？先說出口再翻面"), h("div", { class: "front" }, c.zh || c.ja), c.zh && c.ja ? h("div", { class: "small" }, "日：" + c.ja) : null);
+    if (rv.flipped) card.append(h("div", { class: "front", style: "color:var(--green)" }, c.en), h("div", { class: "row", style: "justify-content:center" }, spk(c.en)), c.pattern ? h("div", { class: "small" }, "句型：" + c.pattern) : null);
   } else {
     card.append(h("div", { class: "muted" }, "你之前說："), h("div", { class: "front del" }, c.said), h("div", { class: "muted" }, "正確要怎麼說？先說出口再翻面"));
     if (rv.flipped) card.append(h("div", { class: "front", style: "color:var(--green)" }, c.corrected), h("div", { class: "row", style: "justify-content:center" }, spk(c.corrected)), c.natural && c.natural !== c.corrected ? h("div", { class: "small" }, "更自然：" + c.natural) : null, c.explain_zh ? h("div", { class: "small", style: "white-space:pre-line" }, c.explain_zh) : null);
   }
   s.append(card);
-  if (!rv.flipped) s.append(h("button", { type: "button", class: "btn primary block", onclick: () => { rv.flipped = true; render(); if (c.type === "sentence") say(c.corrected); } }, "翻面看答案"));
+  if (!rv.flipped) s.append(h("button", { type: "button", class: "btn primary block", onclick: () => { rv.flipped = true; render(); if (c.type === "sentence") say(c.corrected); else if (c.type === "phrase") say(c.en); } }, "翻面看答案"));
   else s.append(h("div", { class: "grade" },
     h("button", { type: "button", class: "btn", onclick: () => grade(0) }, "忘記了"),
     h("button", { type: "button", class: "btn", onclick: () => grade(1) }, "有點難"),
@@ -841,7 +1050,7 @@ function viewSettings() {
   test.addEventListener("click", async () => {
     const k = key.value.trim(); if (!k) { toast("請先貼上金鑰。"); return; }
     test.disabled = true; st.textContent = "測試中…";
-    try { const m = await detectModel(k); if (!m) throw new Error("找不到可用的模型。"); settings.apiKey = k; settings.model = m; LS.set("settings", settings); st.textContent = "✅ 連線成功！AI 模型：" + m; }
+    try { const m = await detectModel(k); if (!m) throw new Error("找不到可用的模型。"); settings.apiKey = k; settings.model = m; settings.ttsModel = ""; gDown = false; LS.set("settings", settings); st.textContent = "✅ 連線成功！AI 模型：" + m; }
     catch (e) { st.textContent = "❌ " + e.message; }
     test.disabled = false;
   });
@@ -852,6 +1061,41 @@ function viewSettings() {
       h("li", null, "按「Get API key」→「Create API key」"),
       h("li", null, "複製金鑰，貼到上面"),
       h("li", null, "不要開啟付費（Billing），就不會被收費")))));
+  // Textbook import (private file kept on the phone; never part of the public page)
+  const tbIn = h("input", { type: "file", accept: "application/json,.json", hidden: true });
+  tbIn.addEventListener("change", async () => {
+    const f = tbIn.files && tbIn.files[0]; tbIn.value = ""; if (!f) return;
+    try {
+      const d = JSON.parse(await f.text());
+      if (d.app !== "mochi-english-textbook" || !Array.isArray(d.days) || !d.days.length) throw 0;
+      tbook = d; if (!profile.tbDay) profile.tbDay = 1; lesson = null;
+      LS.set("tbook", tbook); LS.set("profile", profile); LS.set("lesson", null);
+      toast("已匯入講義（" + d.days.length + " 天）！到「今日」產生課程吧。"); render();
+    } catch { toast("這個檔案不是講義檔，請選 speakup-textbook-PRIVATE.json。"); }
+  });
+  const tbCard = h("div", { class: "card" }, h("h2", null, "講義"), tbIn);
+  if (tbook) {
+    const dayIn = h("input", { type: "text", inputmode: "numeric", value: String(profile.tbDay || 1), style: "width:90px" });
+    const rm = h("button", { type: "button", class: "btn danger" }, "移除講義");
+    rm.addEventListener("click", () => {
+      if (rm.dataset.arm !== "1") { rm.dataset.arm = "1"; rm.textContent = "確定移除？（紀錄會保留）"; setTimeout(() => { rm.dataset.arm = ""; rm.textContent = "移除講義"; }, 4000); return; }
+      tbook = null; lesson = null; LS.set("tbook", null); LS.set("lesson", null); toast("已移除講義。"); render();
+    });
+    tbCard.append(
+      h("div", { class: "muted" }, "已匯入：" + (tbook.title || "講義") + "（" + tbook.days.length + " 天）・目前 Day " + (profile.tbDay || 1)),
+      h("div", { class: "small" }, "每天的課程照講義的順序進行。練習 5 句以上並按「結束練習」，就會進到下一天。"),
+      h("button", { type: "button", class: "btn", onclick: () => go("tblist") }, "📚 講義一覽"),
+      h("div", { class: "row" }, "跳到 Day", dayIn, h("button", { type: "button", class: "btn", onclick: () => {
+        const n = parseInt(dayIn.value, 10);
+        if (n >= 1 && n <= tbook.days.length) { profile.tbDay = n; lesson = null; LS.set("lesson", null); LS.set("profile", profile); toast("已改成 Day " + n); render(); }
+        else toast("請輸入 1〜" + tbook.days.length);
+      } }, "確定")),
+      rm);
+  } else {
+    tbCard.append(h("div", { class: "muted" }, "匯入講義檔後，每天的課程會照講義的 Day 1〜60 進行。講義檔只存在這支手機。"),
+      h("button", { type: "button", class: "btn primary", onclick: () => tbIn.click() }, "匯入講義檔"));
+  }
+  s.append(tbCard);
   const avp = h("div", { class: "avpick" }, Object.keys(AV).map(k => {
     const b = h("button", { type: "button", "aria-pressed": String(settings.avatar === k), onclick: () => { settings.avatar = k; LS.set("settings", settings); render(); } });
     b.append(h("div", { class: "avatar", html: avatarSVG(k) }), h("b", null, AV[k].name), h("span", { class: "small" }, AV[k].who)); return b;
@@ -861,19 +1105,39 @@ function viewSettings() {
   const MALE = /Aaron|Fred|Daniel|Arthur|Gordon|Oliver|Tom|Alex|Evan|Reed|Rishi|Nathan|Lee|Ralph|Albert|Eddy|Rocko|Grandpa|Junior|Guy|Andrew|Brian|Christopher|Eric|Roger|Steffan|Ryan|Thomas|William|David|Mark|George|Male/i;
   const gender = (v) => FEMALE.test(v.name) ? "女聲" : MALE.test(v.name) ? "男聲" : "";
   const vs = h("select", { id: "voice" }, h("option", { value: "" }, "自動選擇（女聲 Samantha 等）"), voicesCache.map(v => h("option", { value: v.voiceURI, selected: v.voiceURI === settings.voice }, (gender(v) ? gender(v) + "・" : "") + v.name.replace(/^Microsoft\s+/i, "").replace(/\s*-\s*English.*$/i, "").replace(/^Google\s+/i, "Google ") + "（" + v.lang.replace("_", "-") + "）")));
-  vs.addEventListener("change", () => { settings.voice = vs.value; LS.set("settings", settings); say("Hello! This is my voice."); });
+  vs.addEventListener("change", () => { settings.voice = vs.value; LS.set("settings", settings); deviceSay(["Hello! This is my voice."]); });
+  const eng = h("select", { id: "engine" },
+    h("option", { value: "gemini", selected: settings.ttsEngine === "gemini" }, "Gemini 自然語音（建議）"),
+    h("option", { value: "device", selected: settings.ttsEngine === "device" }, "iPhone 內建語音"));
+  eng.addEventListener("change", () => { settings.ttsEngine = eng.value; gDown = false; LS.set("settings", settings); render(); });
+  const gv = h("select", { id: "gvoice" }, GVOICES.map(([v, l]) => h("option", { value: v, selected: settings.gVoice === v }, l)));
+  gv.addEventListener("change", () => { settings.gVoice = gv.value; gDown = false; LS.set("settings", settings); say("Hello! This is my voice. Nice to meet you."); });
   const rate = h("input", { type: "range", min: "0.6", max: "1.2", step: "0.05", value: String(settings.rate), style: "width:100%;accent-color:var(--accent)" });
   const rv2 = h("span", null, Number(settings.rate).toFixed(2));
   rate.addEventListener("input", () => { settings.rate = Number(rate.value); rv2.textContent = settings.rate.toFixed(2); LS.set("settings", settings); });
   const chk = (k, label) => { const i = h("input", { type: "checkbox", checked: !!settings[k] }); i.addEventListener("change", () => { settings[k] = i.checked; LS.set("settings", settings); }); return h("label", { class: "chk" }, i, label); };
-  s.append(h("div", { class: "card" }, h("h2", null, "聲音"), vs, h("div", { class: "row" }, "語速", rv2), rate,
-    h("button", { type: "button", class: "btn", onclick: () => say("Hello! Can you hear me clearly? Let's practice English together.") }, "🔊 測試發音"),
-    h("div", { class: "small" }, "聽不到時：確認 iPhone 左側的靜音開關沒有打開、音量有調大。更自然的聲音：iPhone「設定 > 輔助使用 > 朗讀內容 > 聲音 > 英文」下載 Ava（加強版）等，再到這裡選。"),
-    chk("autoSpeak", "自動朗讀（修正句＋回覆）"), chk("autoSend", "說完自動送出")));
+  const isG = settings.ttsEngine === "gemini";
+  const pauseSel = h("select", { id: "pause", style: "width:auto" }, [2, 3, 4, 5].map(n => h("option", { value: String(n), selected: Number(settings.pauseSec) === n }, n + " 秒")));
+  pauseSel.addEventListener("change", () => { settings.pauseSec = Number(pauseSel.value); LS.set("settings", settings); });
+  s.append(h("div", { class: "card" }, h("h2", null, "聲音"),
+    h("div", { class: "small" }, "朗讀方式"), eng,
+    isG ? h("div", { class: "small" }, "Gemini 的聲音（選好會試唸一句，約等 1〜3 秒）") : null, isG ? gv : null,
+    h("div", { class: "small" }, isG ? "iPhone 的聲音（Gemini 不能用時自動改用）" : "iPhone 的聲音"), vs,
+    h("div", { class: "row" }, "語速", rv2), rate,
+    h("button", { type: "button", class: "btn", onclick: () => { gDown = false; say("Hello! Can you hear me clearly? Let's practice English together."); } }, "🔊 測試發音"),
+    h("div", { class: "small" }, isG ? "Gemini 語音每天有免費次數上限，用完時會自動改用 iPhone 的聲音。語速調到 0.85 以下時，Gemini 會唸得比較慢。" : ""),
+    h("div", { class: "small" }, "聽不到時：確認 iPhone 左側的靜音開關沒有打開、音量有調大。"),
+    chk("autoSpeak", "老師自動說話（修正＋回覆）"),
+    chk("speakReason", "也用英文唸出錯誤的理由和更自然的說法（只聽聲音也能學）")));
+  s.append(h("div", { class: "card" }, h("h2", null, "對話"),
+    chk("autoSend", "說完自動送出"),
+    h("div", { class: "row" }, "說完停頓", pauseSel, "後才送出（不會搶答）"),
+    chk("handsFree", "免持對話：老師說完後自動開始聽（不用一直按 🎤）"),
+    h("div", { class: "small" }, "練習中螢幕不會自動關掉，可以把亮度調暗省電。iPhone 關掉螢幕後網頁 App 會暫停；想關掉螢幕練習，請用 Gemini Live（「今日」的「複製老師設定」）。")));
   s.append(h("div", { class: "card" }, h("h2", null, "Gemini Live 用的老師設定"), h("div", { class: "muted" }, "會帶入你的程度、弱點和今天的課程。"), h("button", { type: "button", class: "btn", onclick: copyTeacher }, "複製老師設定"), h("div", { id: "teacher-box" })));
   const exp = h("button", { type: "button", class: "btn" }, "備份（下載檔案）");
   exp.addEventListener("click", () => {
-    const data = { app: "mochi-english", v: 1, at: new Date().toISOString(), settings: Object.assign({}, settings, { apiKey: "" }), profile, sessions, cards, lesson, textbook };
+    const data = { app: "mochi-english", v: 1, at: new Date().toISOString(), settings: Object.assign({}, settings, { apiKey: "" }), profile, sessions, cards, lesson, textbook, tbook };
     const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
     const a = h("a", { href: URL.createObjectURL(blob), download: "mochi-english-backup-" + todayStr() + ".json" }); document.body.append(a); a.click(); a.remove();
     toast("備份檔已下載（不含 API 金鑰）。可存到 iCloud 雲碟。");
@@ -882,7 +1146,7 @@ function viewSettings() {
   const wipe = h("button", { type: "button", class: "btn danger" }, "刪除所有紀錄");
   wipe.addEventListener("click", () => {
     if (wipe.dataset.arm !== "1") { wipe.dataset.arm = "1"; wipe.textContent = "確定要全部刪除？（無法復原）"; setTimeout(() => { wipe.dataset.arm = ""; wipe.textContent = "刪除所有紀錄"; }, 5000); return; }
-    profile = { level: "", levelZh: "", weak: [], strengths: [], note: "", nextFocus: "", stage: "travel", topicIdx: 0, day: 1, levelHistory: [], placementDone: false, practiceDays: [] };
+    profile = { level: "", levelZh: "", weak: [], strengths: [], note: "", nextFocus: "", stage: "travel", topicIdx: 0, day: 1, tbDay: 1, levelHistory: [], placementDone: false, practiceDays: [] };
     sessions = []; cards = []; lesson = null; current = null; textbook = ""; saveAll(); toast("已刪除（API 金鑰和老師設定保留）。"); go("today");
   });
   s.append(h("div", { class: "card" }, h("h2", null, "資料"), h("div", { class: "muted" }, "紀錄只存在這支手機。清除 Safari 的網站資料會不見，建議每週備份一次。"), h("div", { class: "row" }, exp, imp), wipe,
@@ -897,7 +1161,7 @@ $("import-file").addEventListener("change", async (e) => {
     if (d.app !== "mochi-english") throw 0;
     const key = settings.apiKey, model = settings.model;
     settings = Object.assign({}, DEF_SETTINGS, d.settings || {}, { apiKey: key, model });
-    profile = Object.assign(profile, d.profile || {}); sessions = d.sessions || []; cards = d.cards || []; lesson = d.lesson || null; textbook = d.textbook || "";
+    profile = Object.assign(profile, d.profile || {}); sessions = d.sessions || []; cards = d.cards || []; lesson = d.lesson || null; textbook = d.textbook || ""; tbook = d.tbook || tbook;
     saveAll(); toast("還原完成！"); go("today");
   } catch { toast("這個檔案不是 Mochi 英文教室的備份。"); }
 });
